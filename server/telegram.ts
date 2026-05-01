@@ -6,6 +6,7 @@ import { convex } from "./convex-client.js";
 import { handleUserMessage } from "./interaction-agent.js";
 import { broadcast } from "./broadcast.js";
 import { transcribeVoice, WhisperNotConfiguredError } from "./whisper.js";
+import { toMarkdownV2 } from "./markdown-v2.js";
 
 // Telegram Bot API limits a single sendMessage to 4096 chars. Leave a small
 // safety margin so emojis/escapes don't push us over.
@@ -79,18 +80,25 @@ function chunk(text: string, size = MAX_CHUNK): string[] {
   return out;
 }
 
-// Public: send plain text to a Telegram chat. The chatId is the numeric id
-// extracted from the `tg:<chatId>` conversationId.
+// Public: send a message to a Telegram chat. Tries MarkdownV2 first so the
+// agent's natural markdown (bold, italic, code, links) renders nicely in the
+// client. Falls back to plain text if Telegram rejects the formatted payload
+// (the converter is best-effort — malformed escaping or odd LLM output can
+// trigger a 400). Either way the user always gets _something_.
 export async function sendTelegramMessage(chatId: string, text: string): Promise<void> {
   const bot = getBot();
   for (const part of chunk(text)) {
     try {
-      // No parse_mode — keep messages plain so we don't have to escape markdown
-      // returned by sub-agents (URLs, code, etc.).
-      await bot.api.sendMessage(chatId, part);
-      console.log(`[telegram] → sent ${part.length} chars to ${chatId}`);
+      const formatted = toMarkdownV2(part);
+      await bot.api.sendMessage(chatId, formatted, { parse_mode: "MarkdownV2" });
+      console.log(`[telegram] → sent ${part.length} chars (mdv2) to ${chatId}`);
     } catch (err) {
-      console.error(`[telegram] sendMessage to ${chatId} failed:`, err);
+      try {
+        await bot.api.sendMessage(chatId, part);
+        console.log(`[telegram] → sent ${part.length} chars (plain fallback) to ${chatId}`);
+      } catch (plainErr) {
+        console.error(`[telegram] sendMessage to ${chatId} failed:`, plainErr);
+      }
     }
   }
 }
@@ -289,7 +297,11 @@ export async function startTelegramPolling(): Promise<void> {
   // the Node process under --unhandled-rejections=strict (Node 15+).
   bot
     .start({
-      drop_pending_updates: false,
+      // True so messages queued during a crash/restart aren't replayed all at
+      // once on the next boot. Replaying a backlog used to crash the embeddings
+      // model warmup and feed back into the restart loop. We accept the
+      // tradeoff: anything sent during downtime is silently lost on restart.
+      drop_pending_updates: true,
       allowed_updates: ["message"],
       onStart: (info) => {
         pollingStarted = true;
