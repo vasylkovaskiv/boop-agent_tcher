@@ -13,9 +13,22 @@ import { sendTelegramMessage } from "./telegram.js";
 import { ensureTrigger, getComposio, listConnectedToolkits } from "./composio.js";
 import { ensureWebhookSubscription } from "./composio-webhook.js";
 import { describeUserNow } from "./timezone-config.js";
+import {
+  callOpenAILLM,
+  isOpenAICompatModel,
+  AgentRouterNotConfiguredError,
+} from "./llm.js";
 
 const TRIGGER_SLUG = "GMAIL_NEW_GMAIL_MESSAGE";
-const CLASSIFIER_MODEL = "claude-haiku-4-5-20251001";
+// Default classifier: GLM-5.1 via AgentRouter when AGENTROUTER_API_KEY is set
+// (cheaper input/output match for short binary classification), else fall back
+// to Anthropic haiku via the SDK. Both end up costing roughly the same on the
+// prompt token side; the win for GLM is on completion ($2/M vs $4/M) and on
+// avoiding extra Anthropic spend if the user is on the AgentRouter free tier.
+const CLASSIFIER_MODEL =
+  process.env.BOOP_CLASSIFIER_MODEL ??
+  (process.env.AGENTROUTER_API_KEY ? "glm-5.1" : "claude-haiku-4-5-20251001");
+const CLASSIFIER_FALLBACK_MODEL = "claude-haiku-4-5-20251001";
 
 // First event per connection since process boot is treated as warmup —
 // classification is skipped to avoid noise from any backfill behavior on
@@ -118,9 +131,10 @@ How to tell "real personal/work request" from "cold outreach in a friendly costu
 
 When important=true, write a summary in 1-2 short sentences for a Telegram message:
 - Lead with what matters (who is asking what, the deadline, the action).
-- Address the user in second person ("you"). Never refer to the user in third person, even if their name appears in the email — the user IS the recipient and one of the User identities at the bottom.
+- Address the user in second person ("you" — in Russian "ты" or "вы"). Never refer to the user in third person, even if their name appears in the email — the user IS the recipient and one of the User identities at the bottom.
 - Plain text, no markdown, no signoff.
 - Under ~200 chars when possible.
+- Write the summary in RUSSIAN. Sender names, email addresses, URLs, and other proper nouns stay in their original form, but the descriptive prose ("X asks you to confirm Y by Friday") is in Russian.
 
 Respond with ONLY a JSON object: {"important": boolean, "summary": "..."} (omit summary when important=false).`;
 
@@ -184,7 +198,7 @@ export async function classifyEmailImportance(
   options: { model?: string; recordUsage?: boolean } = {},
 ): Promise<{ important: boolean; summary?: string; usage: UsageTotals }> {
   const started = Date.now();
-  const model = options.model ?? CLASSIFIER_MODEL;
+  const requestedModel = options.model ?? CLASSIFIER_MODEL;
   const recordUsage = options.recordUsage ?? true;
   const userIdentities = await getUserGmailIdentities();
   const tzInfo = await describeUserNow();
@@ -202,6 +216,7 @@ export async function classifyEmailImportance(
   // notion of "today" which can be way off.
   const timeBlock = `Current local time: ${tzInfo.now} (timezone: ${tzInfo.timezone}${tzInfo.isExplicit ? "" : ", server fallback — user has not set theirs"}). Today's date in their timezone is ${tzInfo.isoDate}. Use this when judging whether a deadline has already passed.`;
 
+  const systemPrompt = `${RUBRIC_PROMPT}\n\n${prefBlock}\n\n${idBlock}\n\n${timeBlock}`;
   const userPrompt = [
     `Sender: ${email.sender || "(unknown)"}`,
     `Recipient: ${email.recipient || "(unknown)"}`,
@@ -212,20 +227,54 @@ export async function classifyEmailImportance(
 
   let buffer = "";
   let usage: UsageTotals = { ...EMPTY_USAGE };
-  for await (const msg of query({
-    prompt: userPrompt,
-    options: {
-      systemPrompt: `${RUBRIC_PROMPT}\n\n${prefBlock}\n\n${idBlock}\n\n${timeBlock}`,
-      model,
-      permissionMode: "bypassPermissions",
-    },
-  })) {
-    if (msg.type === "assistant") {
-      for (const block of msg.message.content) {
-        if (block.type === "text") buffer += block.text;
+  let model = requestedModel;
+
+  // Route GLM-5.1 (and other OpenAI-compat models) through the OpenAI client
+  // instead of the Claude SDK. On any AgentRouter failure, fall back to haiku
+  // on the Anthropic SDK — missing one classification is acceptable, but a
+  // dropped classifier turn means the user just doesn't get a notice that day.
+  if (isOpenAICompatModel(requestedModel)) {
+    try {
+      const result = await callOpenAILLM({
+        model: requestedModel,
+        systemPrompt,
+        userPrompt,
+        maxTokens: 256,
+      });
+      buffer = result.text;
+      usage = result.usage;
+    } catch (err) {
+      if (err instanceof AgentRouterNotConfiguredError) {
+        console.warn(
+          `[proactive] ${requestedModel} requested but AGENTROUTER_API_KEY missing — falling back to ${CLASSIFIER_FALLBACK_MODEL}`,
+        );
+      } else {
+        console.warn(
+          `[proactive] ${requestedModel} via AgentRouter failed (${err instanceof Error ? err.message : err}) — falling back to ${CLASSIFIER_FALLBACK_MODEL}`,
+        );
       }
-    } else if (msg.type === "result") {
-      usage = aggregateUsageFromResult(msg, model);
+      model = CLASSIFIER_FALLBACK_MODEL;
+    }
+  }
+
+  // Anthropic SDK path — either the user requested a Claude model directly,
+  // or the OpenAI-compat call above bailed out and set model to the fallback.
+  if (!isOpenAICompatModel(model) && buffer === "") {
+    for await (const msg of query({
+      prompt: userPrompt,
+      options: {
+        systemPrompt,
+        model,
+        permissionMode: "bypassPermissions",
+      },
+    })) {
+      if (msg.type === "assistant") {
+        for (const block of msg.message.content) {
+          if (block.type === "text") buffer += block.text;
+        }
+      } else if (msg.type === "result") {
+        usage = aggregateUsageFromResult(msg, model);
+      }
     }
   }
 
@@ -296,15 +345,19 @@ async function dispatchProactiveNotice(summary: string): Promise<void> {
     return;
   }
   const conversationId = `tg:${chatId}`;
-  const reply = await handleUserMessage({
+  const result = await handleUserMessage({
     conversationId,
     content: `[proactive notice] ${summary}`,
     kind: "proactive",
   });
-  // handleUserMessage only sends Telegram messages from inside send_ack; the
-  // final reply is the caller's responsibility.
+  const reply = result.reply;
+  // For proactive turns the dispatcher streams nothing (kind === "proactive"
+  // disables the stream) so replyDelivered should always be false here, but
+  // we honor it anyway in case that ever changes.
   if (reply && reply !== "(no reply)") {
-    await sendTelegramMessage(chatId, reply);
+    if (!result.replyDelivered) {
+      await sendTelegramMessage(chatId, reply);
+    }
     await convex.mutation(api.messages.send, {
       conversationId,
       role: "assistant",

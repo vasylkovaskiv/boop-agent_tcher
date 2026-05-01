@@ -74,7 +74,9 @@ Style:
 
 Safety:
 - Anything that sends a message, creates an event, or takes an external action: call save_draft with a JSON payload instead of the real send/create tool. Return the summary so the interaction agent can show it to the user.
-- Only the interaction agent's send_draft tool commits. You never commit.`;
+- Only the interaction agent's send_draft tool commits. You never commit.
+
+Language: Write your final answer in Russian by default — the user is Russian-speaking. URLs, code, command names, and integration names (Gmail, Slack, etc.) stay in their original form. Switch language ONLY when the task or content is clearly in another language (e.g. drafting an English email to an English-speaking colleague — that email body stays in English, but your meta-commentary about it stays in Russian).`;
 
 export interface SpawnOptions {
   task: string;

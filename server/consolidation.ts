@@ -3,6 +3,7 @@ import { api } from "../convex/_generated/api.js";
 import { convex } from "./convex-client.js";
 import { broadcast } from "./broadcast.js";
 import { aggregateUsageFromResult, EMPTY_USAGE, type UsageTotals } from "./usage.js";
+import { callOpenAILLM, isOpenAICompatModel } from "./llm.js";
 
 function randomId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -97,8 +98,15 @@ interface Challenge {
   severity: "low" | "medium" | "high";
 }
 
-const ADVERSARY_MODEL = process.env.BOOP_ADVERSARY_MODEL ?? "claude-haiku-4-5";
-const DEFAULT_MODEL = process.env.BOOP_MODEL ?? "claude-sonnet-4-6";
+// Adversary model: defaults to GLM-5.1 via AgentRouter when AGENTROUTER_API_KEY
+// is set, otherwise haiku via the Claude Agent SDK. The adversary stage is a
+// natural fit for "second head" diversity — running it on a different model
+// family pushes back against echo-chamber consolidation. Override with
+// BOOP_ADVERSARY_MODEL to pin a specific model.
+const ADVERSARY_MODEL =
+  process.env.BOOP_ADVERSARY_MODEL ??
+  (process.env.AGENTROUTER_API_KEY ? "glm-5.1" : "claude-haiku-4-5-20251001");
+const DEFAULT_MODEL = process.env.BOOP_MODEL ?? "claude-haiku-4-5-20251001";
 
 interface Decision {
   proposalIndex: number;
@@ -117,6 +125,21 @@ async function runLlm(
   userPrompt: string,
   model: string = DEFAULT_MODEL,
 ): Promise<{ buffer: string; usage: UsageTotals; durationMs: number }> {
+  // OpenAI-compat models (glm-5.1, etc.) take the AgentRouter path through
+  // the OpenAI SDK. The Adversary stage routes here when AGENTROUTER_API_KEY
+  // is configured. Proposer / Judge stay on Claude (DEFAULT_MODEL) because
+  // they need higher-quality reasoning and the Adversary's job is
+  // specifically to be a different perspective.
+  if (isOpenAICompatModel(model)) {
+    const result = await callOpenAILLM({
+      model,
+      systemPrompt,
+      userPrompt,
+      maxTokens: 2048,
+    });
+    return { buffer: result.text, usage: result.usage, durationMs: result.durationMs };
+  }
+
   const started = Date.now();
   let buffer = "";
   let usage: UsageTotals = { ...EMPTY_USAGE };
