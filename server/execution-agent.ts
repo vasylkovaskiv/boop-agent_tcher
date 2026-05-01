@@ -67,7 +67,7 @@ output to the user verbatim, so if you don't include URLs, the user won't see
 any.
 
 Style:
-- Optimize for iMessage delivery: short sentences, bullets over paragraphs, no tables.
+- Optimize for Telegram delivery: short sentences, bullets over paragraphs, no tables.
 - Prefer markdown with **bold** keywords and • bullets.
 - Under 500 words unless explicitly asked for more.
 - If you can't complete something, say why in one sentence.

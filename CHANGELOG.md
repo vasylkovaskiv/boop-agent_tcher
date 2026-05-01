@@ -8,6 +8,23 @@ Format:
 
 ---
 
+## Unreleased — Telegram bot + Whisper voice transcription
+
+- **[BREAKING]** Replaced the Sendblue/iMessage transport with a [Telegram bot](https://t.me/BotFather) (`grammy` client). All inbound messages now arrive via long-polling (default) or webhook; outbound replies go through `sendTelegramMessage`. `server/sendblue.ts` is deleted; the public surface is `server/telegram.ts`.
+- **[BREAKING]** Conversation ids changed from `sms:+1...` to `tg:<chat_id>`. The Convex `messages.conversationId` field is still `v.string()` so no schema migration is needed for that, but old rows keyed by `sms:` won't be found by the new agent — they remain readable in the dashboard.
+- **[BREAKING]** Removed the `sendblueDedup` table from `convex/schema.ts`. If you had data in it, clear the table from the Convex dashboard **before** running `npx convex deploy` — Convex refuses to drop a non-empty table.
+- **[BREAKING]** Renamed env vars:
+  - `BOOP_USER_PHONE` → `BOOP_USER_TG_CHAT_ID`
+  - `SENDBLUE_API_KEY` / `SENDBLUE_API_SECRET` / `SENDBLUE_FROM_NUMBER` → removed
+  - new: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_CHAT_IDS`, `TELEGRAM_MODE` (`polling` default), `WHISPER_URL`
+- Added: `whisper-service/` — FastAPI + faster-whisper sidecar that exposes `POST /transcribe`. Telegram voice notes are POSTed to `WHISPER_URL` and the resulting text is fed to the agent like any other message. Falls back gracefully when the sidecar is offline.
+- Added: top-level `Dockerfile` (Node 20 boop image) and `docker-compose.yml` configured for a Traefik-fronted VPS — two networks (`boop-net` internal, `traefik-public` external opt-in), unique `boop-*` Traefik names, healthchecks, mem/cpu limits.
+- Changed: `scripts/dev.mjs` is polling-first. ngrok is only spun up when you explicitly need a public URL (Composio webhook or `TELEGRAM_MODE=webhook`). Removed all Sendblue auto-register logic and `scripts/sendblue-*.mjs` helpers.
+- Changed: dispatcher / executor system prompts updated to reference Telegram (chunk size guidance bumped 2900 → 4000).
+- Migration skill: `/upgrade-boop` already handles the file-level merge; the env-var rename + Convex table drop need a manual one-time pass on your fork.
+
+---
+
 ## Unreleased — Local embeddings fallback + mandatory recall
 
 - Added: free local embedding fallback via `@huggingface/transformers` (`Xenova/bge-large-en-v1.5`, 1024-dim). `server/embeddings.ts` now tries Voyage → OpenAI → local in order. All three providers produce 1024-dim vectors so the existing Convex `vectorIndex("by_embedding", { dimensions: 1024 })` stays compatible — users running with a paid key see no change; users without one go from "recall silently degraded to literal substring match" to working semantic recall out of the box.

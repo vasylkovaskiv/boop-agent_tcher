@@ -4,7 +4,11 @@ import cors from "cors";
 import { createServer } from "node:http";
 import { WebSocketServer } from "ws";
 import { addClient } from "./broadcast.js";
-import { createSendblueRouter } from "./sendblue.js";
+import {
+  createTelegramWebhookRouter,
+  registerTelegramWebhook,
+  startTelegramPolling,
+} from "./telegram.js";
 import { handleUserMessage } from "./interaction-agent.js";
 import { loadIntegrations } from "./integrations/registry.js";
 import { startCleanupLoop } from "./memory/clean.js";
@@ -52,7 +56,10 @@ async function main() {
     res.json({ ok: true, service: "boop-agent" });
   });
 
-  app.use("/sendblue", createSendblueRouter());
+  const telegramMode = (process.env.TELEGRAM_MODE ?? "polling").toLowerCase();
+  if (telegramMode === "webhook") {
+    app.use("/telegram", createTelegramWebhookRouter());
+  }
   app.use("/composio", createComposioRouter());
   app.use("/memory", createMemoryRouter());
 
@@ -111,9 +118,29 @@ async function main() {
     console.log(`boop-agent server listening on :${port}`);
     console.log(`  health      GET  http://localhost:${port}/health`);
     console.log(`  chat        POST http://localhost:${port}/chat`);
-    console.log(`  sendblue    POST http://localhost:${port}/sendblue/webhook`);
+    if (telegramMode === "webhook") {
+      console.log(`  telegram    POST http://localhost:${port}/telegram/webhook`);
+    }
     console.log(`  websocket   WS   ws://localhost:${port}/ws`);
   });
+
+  // Boot the Telegram transport AFTER the HTTP server is listening so the
+  // webhook receiver (if enabled) is ready before Telegram starts hitting it.
+  if (telegramMode === "webhook") {
+    if (!stableUrl) {
+      console.warn(
+        "[telegram] TELEGRAM_MODE=webhook but PUBLIC_URL is not set — Telegram won't know where to deliver updates.",
+      );
+    } else {
+      registerTelegramWebhook(stableUrl).catch((err) =>
+        console.error("[telegram] webhook registration failed", err),
+      );
+    }
+  } else {
+    startTelegramPolling().catch((err) =>
+      console.error("[telegram] polling failed to start", err),
+    );
+  }
 }
 
 main().catch((err) => {
