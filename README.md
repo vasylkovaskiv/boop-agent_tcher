@@ -197,7 +197,7 @@ Boop ships a small Python sidecar in [`whisper-service/`](./whisper-service/) â€
 
 ```
 POST /transcribe
-{ "fileUrl": "https://api.telegram.org/file/bot.../voice.oga" }
+{ "url": "https://api.telegram.org/file/bot.../voice.oga" }
 
 â†’ { "text": "...", "language": "en", "duration": 4.7 }
 ```
