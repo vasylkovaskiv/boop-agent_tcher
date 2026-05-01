@@ -5,10 +5,14 @@ const MODEL_KEY = "model";
 const MODEL_TTL_MS = 30 * 1000;
 let cached: { at: number; value: string } | null = null;
 
-// User-friendly aliases the agent can pass through from iMessage. Resolved to
-// canonical Anthropic model IDs before being handed to the SDK.
+// User-friendly aliases the agent can pass through from Telegram. Resolved to
+// canonical Anthropic model IDs before being handed to the SDK. Includes the
+// AgentRouter-available IDs (haiku-4-5, opus-4-6) since that's what most users
+// route through these days; the older 4-7 / sonnet ids stay as aliases for
+// users on direct Anthropic with the latest weights.
 export const MODEL_ALIASES: Record<string, string> = {
-  opus: "claude-opus-4-7",
+  opus: "claude-opus-4-6",
+  "opus 4.6": "claude-opus-4-6",
   "opus 4.7": "claude-opus-4-7",
   sonnet: "claude-sonnet-4-6",
   "sonnet 4.6": "claude-sonnet-4-6",
@@ -18,6 +22,7 @@ export const MODEL_ALIASES: Record<string, string> = {
 
 export const KNOWN_MODELS = new Set<string>([
   "claude-opus-4-7",
+  "claude-opus-4-6",
   "claude-sonnet-4-6",
   "claude-haiku-4-5-20251001",
 ]);
@@ -29,7 +34,10 @@ export function resolveModelInput(input: string): string | null {
 }
 
 function envFallback(): string {
-  return process.env.BOOP_MODEL ?? "claude-sonnet-4-6";
+  // Default to haiku-4-5 — it's the cheapest Claude available on AgentRouter
+  // (where most users route now) and works well as a dispatcher. Direct
+  // Anthropic users can still override via BOOP_MODEL=claude-sonnet-4-6.
+  return process.env.BOOP_MODEL ?? "claude-haiku-4-5-20251001";
 }
 
 export async function getRuntimeModel(): Promise<string> {

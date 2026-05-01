@@ -36,7 +36,7 @@ export function createSelfMcp() {
           const tzInfo = await describeUserNow();
           const config = {
             model: await getRuntimeModel(),
-            envDefault: process.env.BOOP_MODEL ?? "claude-sonnet-4-6",
+            envDefault: process.env.BOOP_MODEL ?? "claude-haiku-4-5-20251001",
             availableModels: [...KNOWN_MODELS],
             userTimezone: tzInfo.isExplicit ? tzInfo.timezone : null,
             timezoneFallback: tzInfo.isExplicit ? null : tzInfo.timezone,

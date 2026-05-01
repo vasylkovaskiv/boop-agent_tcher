@@ -55,7 +55,20 @@ function chunk(text: string, size = MAX_CHUNK): string[] {
   const out: string[] = [];
   let buf = "";
   for (const line of text.split(/\n/)) {
-    if ((buf + "\n" + line).length > size) {
+    if (line.length > size) {
+      // A single line is over the limit (e.g. a long URL list, a base64
+      // blob, or a code block from a sub-agent). Without this branch the
+      // line is pushed as-is and Telegram rejects sendMessage with HTTP 400,
+      // and the catch in sendTelegramMessage swallows it — user gets
+      // nothing. Flush the current buf and hard-split the line.
+      if (buf) {
+        out.push(buf);
+        buf = "";
+      }
+      for (let i = 0; i < line.length; i += size) {
+        out.push(line.slice(i, i + size));
+      }
+    } else if ((buf + "\n" + line).length > size) {
       if (buf) out.push(buf);
       buf = line;
     } else {
@@ -160,7 +173,7 @@ async function extractInboundText(ctx: Context): Promise<InboundContent | null> 
       const transcript = result.text.trim();
       if (!transcript) {
         await ctx.reply(
-          "I couldn't make out anything in that voice note — sounded silent. Try again or send text.",
+          "Не разобрала ничего в этом голосовом — похоже на тишину. Попробуй ещё раз или отправь текстом.",
         );
         return null;
       }
@@ -173,12 +186,12 @@ async function extractInboundText(ctx: Context): Promise<InboundContent | null> 
         // Voice transcription is opt-in. Tell the user clearly instead of
         // pretending Whisper is temporarily down.
         await ctx.reply(
-          "Voice transcription isn't enabled on this bot. Please send text.",
+          "Распознавание голоса не включено в этом боте. Отправь текстом.",
         );
       } else {
         console.error("[telegram] whisper transcription failed:", err);
         await ctx.reply(
-          "Couldn't transcribe that voice note — Whisper isn't reachable right now. Try sending text instead.",
+          "Не получилось распознать голосовое — Whisper сейчас недоступен. Попробуй отправить текстом.",
         );
       }
       return null;
@@ -226,19 +239,24 @@ async function handleUpdate(ctx: Context): Promise<void> {
   const stopTyping = startTypingLoop(String(chat.id));
   const start = Date.now();
   try {
-    const reply = await handleUserMessage({
+    const result = await handleUserMessage({
       conversationId,
       content: inbound.text,
       turnTag,
       onThinking: (t) => broadcast("thinking", { conversationId, t }),
     });
+    const reply = result.reply;
     if (reply) {
       const elapsed = ((Date.now() - start) / 1000).toFixed(1);
       const replyPreview = reply.length > 100 ? reply.slice(0, 100) + "…" : reply;
       console.log(
         `[turn ${turnTag}] → reply (${elapsed}s, ${reply.length} chars): ${JSON.stringify(replyPreview)}`,
       );
-      await sendTelegramMessage(String(chat.id), reply);
+      // Streaming path already delivered the message via stream.finalize() —
+      // skip the second send here to avoid duplicating it.
+      if (!result.replyDelivered) {
+        await sendTelegramMessage(String(chat.id), reply);
+      }
       await convex.mutation(api.messages.send, {
         conversationId,
         role: "assistant",
@@ -251,7 +269,7 @@ async function handleUpdate(ctx: Context): Promise<void> {
     console.error(`[turn ${turnTag}] handler error`, err);
     await sendTelegramMessage(
       String(chat.id),
-      "Something broke on my side. Try again in a minute — logs will have the details.",
+      "Что-то сломалось на моей стороне. Попробуй через минуту — детали в логах.",
     );
   } finally {
     stopTyping();

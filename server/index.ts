@@ -98,8 +98,8 @@ async function main() {
       return;
     }
     try {
-      const reply = await handleUserMessage({ conversationId, content });
-      res.json({ reply });
+      const result = await handleUserMessage({ conversationId, content });
+      res.json({ reply: result.reply });
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: String(err) });

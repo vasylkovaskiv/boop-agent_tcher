@@ -11,6 +11,7 @@ import { createSelfMcp } from "./self-tools.js";
 import { getRuntimeModel } from "./runtime-config.js";
 import { broadcast } from "./broadcast.js";
 import { sendTelegramMessage } from "./telegram.js";
+import { createDraftStream, type DraftStream } from "./telegram-stream.js";
 import { aggregateUsageFromResult, EMPTY_USAGE, type UsageTotals } from "./usage.js";
 
 const INTERACTION_SYSTEM = `You are Boop, a personal agent the user texts from Telegram.
@@ -162,7 +163,9 @@ before saving.
 
 Available integrations for spawn_agent: {{INTEGRATIONS}}
 
-Format: Plain Telegram-friendly text. Markdown sparingly. Keep replies under ~600 chars when you can; the hard limit is 4096.`;
+Format: Plain Telegram-friendly text. Markdown sparingly. Keep replies under ~600 chars when you can; the hard limit is 4096.
+
+Language: Reply to the user in Russian by default — including ack messages (send_ack), final replies, and any clarifying questions. Russian acks: "Сейчас, секунду 🔍", "Смотрю календарь…", "Готовлю письмо.", "Проверяю Slack, держись.". Switch language ONLY if the user writes to you in another language or explicitly asks for one. URLs, code, command names, and integration names (Gmail, Slack, etc.) stay in their original form regardless of language.`;
 
 interface HandleOpts {
   conversationId: string;
@@ -179,7 +182,14 @@ function randomId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-export async function handleUserMessage(opts: HandleOpts): Promise<string> {
+export interface HandleResult {
+  reply: string;
+  /** True when the dispatcher already sent the reply to Telegram via the
+   *  streaming draft path. Callers should NOT re-send when this is true. */
+  replyDelivered: boolean;
+}
+
+export async function handleUserMessage(opts: HandleOpts): Promise<HandleResult> {
   const turnId = randomId("turn");
   const integrations = availableIntegrations();
 
@@ -306,6 +316,23 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
   const requestedModel = await getRuntimeModel();
   let reply = "";
   let usage: UsageTotals = { ...EMPTY_USAGE };
+
+  // Live streaming via Telegram drafts. Only the FINAL assistant turn ends up
+  // in the user-visible message (pre-tool narration is reset on each new
+  // assistant turn), so the stream's reset() lines up with the same boundary
+  // we use for `reply`. Proactive turns deliver their notice through a
+  // separate single-shot path — don't stream them.
+  const isStreamableTelegramTurn =
+    opts.conversationId.startsWith("tg:") && opts.kind !== "proactive";
+  let stream: DraftStream | null = null;
+  if (isStreamableTelegramTurn) {
+    const chatId = opts.conversationId.slice(3);
+    stream = createDraftStream(chatId);
+  }
+  // Whether stream.finalize() (or fallback sendTelegramMessage) has already
+  // delivered the reply. If true, the caller (telegram.ts) skips its own send.
+  let replyDelivered = false;
+
   try {
     for await (const msg of query({
       prompt,
@@ -364,9 +391,14 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
         // concatenated with the post-tool-result final text, sends as one
         // smushed Telegram message. Streaming via onThinking still sees everything.
         reply = "";
+        // Match the same boundary in the live draft so pre-tool narration
+        // doesn't pile up in the streamed text. The user sees the draft
+        // animation reset and the final answer rebuild from scratch.
+        stream?.reset();
         for (const block of msg.message.content) {
           if (block.type === "text") {
             reply += block.text;
+            stream?.push(block.text);
             opts.onThinking?.(block.text);
           } else if (block.type === "tool_use") {
             const name = block.name.replace(/^mcp__boop-[a-z-]+__/, "");
@@ -382,7 +414,8 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
     }
   } catch (err) {
     console.error(`[turn ${tag}] query failed`, err);
-    reply = "Sorry — I hit an error processing that. Try again in a moment.";
+    stream?.abort();
+    reply = "Извини — возникла ошибка при обработке. Попробуй через минуту.";
   }
 
   // Sometimes the model produces a placeholder string like "(no output)" or
@@ -400,7 +433,20 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
     // Frame as model-side hiccup, not user error — the placeholder fires
     // when the model loses the thread mid-tool-call, the user's phrasing
     // is fine.
-    reply = "Hmm — got tangled up there. Want to try that again?";
+    reply = "Хмм — что-то запуталась. Попробуем ещё раз?";
+  }
+
+  // Commit the streamed draft (or send the message if streaming was off).
+  // Do this BEFORE persisting/extracting so the user sees the reply ASAP.
+  if (stream) {
+    try {
+      await stream.finalize(reply);
+      replyDelivered = true;
+    } catch (err) {
+      console.error(`[turn ${tag}] stream finalize failed`, err);
+      stream.abort();
+      // Caller will fall back to its own sendTelegramMessage on replyDelivered=false.
+    }
   }
 
   if (usage.costUsd > 0 || usage.inputTokens > 0) {
@@ -439,5 +485,5 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
     }).catch((err) => console.error("[interaction] extraction error", err));
   }
 
-  return reply;
+  return { reply, replyDelivered };
 }
