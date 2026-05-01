@@ -1,10 +1,11 @@
+import { createHmac } from "node:crypto";
 import express from "express";
 import { Bot, type Context, GrammyError, HttpError } from "grammy";
 import { api } from "../convex/_generated/api.js";
 import { convex } from "./convex-client.js";
 import { handleUserMessage } from "./interaction-agent.js";
 import { broadcast } from "./broadcast.js";
-import { transcribeVoice } from "./whisper.js";
+import { transcribeVoice, WhisperNotConfiguredError } from "./whisper.js";
 
 // Telegram Bot API limits a single sendMessage to 4096 chars. Leave a small
 // safety margin so emojis/escapes don't push us over.
@@ -168,10 +169,18 @@ async function extractInboundText(ctx: Context): Promise<InboundContent | null> 
       );
       return { text: transcript, fromVoice: true };
     } catch (err) {
-      console.error("[telegram] whisper transcription failed:", err);
-      await ctx.reply(
-        "Couldn't transcribe that voice note — Whisper isn't reachable right now. Try sending text instead.",
-      );
+      if (err instanceof WhisperNotConfiguredError) {
+        // Voice transcription is opt-in. Tell the user clearly instead of
+        // pretending Whisper is temporarily down.
+        await ctx.reply(
+          "Voice transcription isn't enabled on this bot. Please send text.",
+        );
+      } else {
+        console.error("[telegram] whisper transcription failed:", err);
+        await ctx.reply(
+          "Couldn't transcribe that voice note — Whisper isn't reachable right now. Try sending text instead.",
+        );
+      }
       return null;
     }
   }
@@ -256,26 +265,56 @@ export async function startTelegramPolling(): Promise<void> {
   if (pollingStarted) return;
   const bot = getBot();
   bot.on("message", handleUpdate);
-  // Don't await: bot.start() never resolves in long-polling mode.
-  bot.start({
-    drop_pending_updates: false,
-    allowed_updates: ["message"],
-    onStart: (info) => {
-      pollingStarted = true;
-      console.log(`[telegram] polling as @${info.username}`);
-    },
-  });
+  // Don't await: bot.start() never resolves in long-polling mode. But it
+  // _can_ reject during init (bad token, network down) — surface those
+  // instead of letting them become an unhandled rejection that crashes
+  // the Node process under --unhandled-rejections=strict (Node 15+).
+  bot
+    .start({
+      drop_pending_updates: false,
+      allowed_updates: ["message"],
+      onStart: (info) => {
+        pollingStarted = true;
+        console.log(`[telegram] polling as @${info.username}`);
+      },
+    })
+    .catch((err) => {
+      pollingStarted = false;
+      console.error("[telegram] polling failed to start:", err);
+    });
 }
 
 // === Webhook lifecycle ===
 // Mount the router and set the webhook URL on Telegram's side. Use only when
 // PUBLIC_URL is a stable HTTPS endpoint (e.g. behind Traefik with Let's
 // Encrypt). See README's deployment section.
+//
+// Anti-spoof: setWebhook is called with a `secret_token` derived from the bot
+// token. Telegram echoes it back in the X-Telegram-Bot-Api-Secret-Token
+// header on every delivery, and the router rejects requests without a match.
+// Without this, anyone who learns the public webhook URL can forge updates
+// with a spoofed chat.id and bypass TELEGRAM_ALLOWED_CHAT_IDS.
+function getWebhookSecret(): string {
+  // HMAC over a fixed label so the same bot token always yields the same
+  // secret. Allowed alphabet for Telegram's secret_token is [A-Za-z0-9_-]
+  // up to 256 chars; hex satisfies that.
+  return createHmac("sha256", getToken())
+    .update("boop-telegram-webhook-v1")
+    .digest("hex");
+}
+
 export function createTelegramWebhookRouter(): express.Router {
   const router = express.Router();
   const bot = getBot();
+  const expected = getWebhookSecret();
   bot.on("message", handleUpdate);
   router.post("/webhook", async (req, res) => {
+    const provided = req.header("x-telegram-bot-api-secret-token");
+    if (provided !== expected) {
+      console.warn("[telegram] webhook rejected: bad or missing secret token");
+      res.status(403).json({ ok: false });
+      return;
+    }
     // Acknowledge immediately so Telegram doesn't retry on slow handlers.
     res.json({ ok: true });
     try {
@@ -293,6 +332,7 @@ export async function registerTelegramWebhook(publicUrl: string): Promise<void> 
   await bot.api.setWebhook(url, {
     drop_pending_updates: false,
     allowed_updates: ["message"],
+    secret_token: getWebhookSecret(),
   });
   console.log(`[telegram] webhook registered at ${url}`);
 }
