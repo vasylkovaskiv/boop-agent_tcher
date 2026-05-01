@@ -41,7 +41,11 @@ services:
     depends_on:
       whisper:
         condition: service_started
-    mem_limit: 1500m
+    # mem_limit intentionally absent: the Node runtime + the local embeddings
+    # model (~440 MB) + the spawned Claude CLI subprocess together peak well
+    # above 2 GB during a busy turn. A hard cap silently OOM-kills the
+    # container without leaving anything in the logs. Trust the host (typical
+    # 4–8 GB VPS) and rely on Linux's overall pressure to evict if needed.
     cpus: 2.0
     labels:
       # ---- Traefik wiring ---------------------------------------------------
@@ -94,7 +98,10 @@ services:
       - boop-net
     volumes:
       - whisper-cache:/models
-    mem_limit: 3500m
+    # whisper-medium with int8 peaks ~900 MB at runtime, but model loading
+    # briefly spikes; 4 GB headroom keeps the OOM killer away from edge cases
+    # like a sudden burst of long voice notes.
+    mem_limit: 4000m
     cpus: 2.0
 
 networks:

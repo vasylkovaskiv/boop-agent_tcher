@@ -7,7 +7,8 @@ build/
 *.log
 .DS_Store
 .convex/
-convex/_generated/
+# convex/_generated/ is committed so the Docker image works without
+# requiring a network-dependent `npx convex codegen` step at build time.
 data/
 *.db
 *.db-journal
