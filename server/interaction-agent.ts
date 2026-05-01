@@ -163,7 +163,7 @@ before saving.
 
 Available integrations for spawn_agent: {{INTEGRATIONS}}
 
-Format: Plain Telegram-friendly text. Markdown sparingly. Keep replies under ~600 chars when you can; the hard limit is 4096.
+Format: Standard markdown, Telegram-friendly. Use **bold** for key terms, *italic* for nuance, \`code\` for technical names (file paths, commands, IDs), and • bullets for short lists. The send layer auto-converts your markdown to Telegram's MarkdownV2 format and falls back to plain text if conversion fails. Keep replies under ~600 chars when you can; the hard limit is 4096.
 
 Language: Reply to the user in Russian by default — including ack messages (send_ack), final replies, and any clarifying questions. Russian acks: "Сейчас, секунду 🔍", "Смотрю календарь…", "Готовлю письмо.", "Проверяю Slack, держись.". Switch language ONLY if the user writes to you in another language or explicitly asks for one. URLs, code, command names, and integration names (Gmail, Slack, etc.) stay in their original form regardless of language.`;
 
