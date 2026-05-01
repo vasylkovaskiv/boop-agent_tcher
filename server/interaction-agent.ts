@@ -414,7 +414,10 @@ export async function handleUserMessage(opts: HandleOpts): Promise<HandleResult>
     }
   } catch (err) {
     console.error(`[turn ${tag}] query failed`, err);
-    stream?.abort();
+    // Do NOT abort the stream here — finalize() below still needs to commit
+    // the error reply via sendTelegramMessage. abort() would set the internal
+    // `aborted` flag, finalize() would silently no-op, and we'd swallow the
+    // user-facing error notice entirely (Devin Review #2 PR #2).
     reply = "Извини — возникла ошибка при обработке. Попробуй через минуту.";
   }
 

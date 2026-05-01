@@ -119,7 +119,12 @@ export function createDraftStream(chatId: string): DraftStream {
       // Pushing "" triggers a Telegram error (text must be 1-4096 chars).
     },
     async finalize(text: string) {
-      if (aborted || finalized) return;
+      // finalize() must ALWAYS send unless we've already finalized — even if
+      // aborted is true. Earlier behaviour silently no-op'd on aborted, which
+      // meant the catch-and-retry path in interaction-agent.ts (which called
+      // stream.abort() before stream.finalize() with the error reply) ate the
+      // user-facing error message entirely. Sending here is the contract.
+      if (finalized) return;
       finalized = true;
       if (pendingTimer) {
         clearTimeout(pendingTimer);
