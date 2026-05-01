@@ -31,14 +31,26 @@ interface Token {
 /**
  * Tokenise LLM-style markdown into a flat list of typed segments.
  * Recognised constructs:
- *   **bold**  or  __bold__
- *   *italic*  or  _italic_
+ *   **bold**  or  __bold__   (both map to MarkdownV2 bold)
+ *   *italic*  or  _italic_   (both map to MarkdownV2 italic)
  *   ~~strike~~
  *   `inline code`
  *   ```lang\ncode\n```
  *   [text](url)
  *   # / ## / ### headings (converted to bold)
+ *
+ * Note: Telegram MarkdownV2 uses `__` for underline, but LLMs produce `__`
+ * for bold (standard markdown). We follow the LLM convention here — a
+ * tokenised `__text__` is rendered as `*text*` (bold) in MarkdownV2 output.
  */
+function isWordBoundary(ch: string | undefined): boolean {
+  // Treat undefined / whitespace / punctuation as boundary; alphanumerics are
+  // intraword and must not start/end a `_` italic run (otherwise snake_case
+  // identifiers in LLM output get incorrectly parsed as italic).
+  if (ch === undefined) return true;
+  return !/[A-Za-z0-9\u0400-\u04FF]/.test(ch);
+}
+
 function tokenize(src: string): Token[] {
   const tokens: Token[] = [];
   let i = 0;
@@ -120,6 +132,18 @@ function tokenize(src: string): Token[] {
       }
     }
 
+    // Bold: __text__ (must check before single _). Mapped to MarkdownV2 bold.
+    if (src.startsWith("__", i) && src[i + 2] !== "_") {
+      const closeIdx = src.indexOf("__", i + 2);
+      if (closeIdx !== -1 && closeIdx > i + 2 && src[closeIdx + 2] !== "_") {
+        flush();
+        const inner = src.slice(i + 2, closeIdx);
+        tokens.push({ type: "bold", raw: src.slice(i, closeIdx + 2), inner });
+        i = closeIdx + 2;
+        continue;
+      }
+    }
+
     // Italic: *text* (single star, not followed by another star)
     if (src[i] === "*" && src[i + 1] !== "*") {
       const closeIdx = src.indexOf("*", i + 1);
@@ -128,6 +152,36 @@ function tokenize(src: string): Token[] {
         const inner = src.slice(i + 1, closeIdx);
         tokens.push({ type: "italic", raw: src.slice(i, closeIdx + 1), inner });
         i = closeIdx + 1;
+        continue;
+      }
+    }
+
+    // Italic: _text_ (single underscore). Requires word boundaries on both
+    // sides so we don't misparse snake_case identifiers as italic. Inner
+    // closing delimiter must NOT be doubled (that's __bold__) and must
+    // sit at a word boundary on the right.
+    if (src[i] === "_" && src[i + 1] !== "_" && isWordBoundary(src[i - 1])) {
+      let scan = i + 1;
+      let matchedClose = -1;
+      while (scan < src.length) {
+        const closeIdx = src.indexOf("_", scan);
+        if (closeIdx === -1) break;
+        if (
+          src[closeIdx + 1] !== "_" &&
+          src[closeIdx - 1] !== "_" &&
+          isWordBoundary(src[closeIdx + 1]) &&
+          src[closeIdx - 1] !== " "
+        ) {
+          matchedClose = closeIdx;
+          break;
+        }
+        scan = closeIdx + 1;
+      }
+      if (matchedClose !== -1) {
+        flush();
+        const inner = src.slice(i + 1, matchedClose);
+        tokens.push({ type: "italic", raw: src.slice(i, matchedClose + 1), inner });
+        i = matchedClose + 1;
         continue;
       }
     }
@@ -180,8 +234,10 @@ export function toMarkdownV2(src: string): string {
         out += "`" + t.inner!.replace(/([`\\])/g, "\\$1") + "`";
         break;
       case "code_block":
-        // Inside code blocks, only ``` needs escaping; content is literal.
-        out += "```" + (t.lang ?? "") + "\n" + t.inner! + "```";
+        // Inside `pre` entities, ` and \ must still be escaped per Telegram
+        // MarkdownV2 spec — otherwise code blocks containing regex, file paths,
+        // or nested backticks fail with HTTP 400 and lose their formatting.
+        out += "```" + (t.lang ?? "") + "\n" + t.inner!.replace(/([`\\])/g, "\\$1") + "```";
         break;
       case "link":
         // MarkdownV2 link: [escaped text](url) — URL needs escaping of ) and \
