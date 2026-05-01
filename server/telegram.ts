@@ -8,9 +8,16 @@ import { broadcast } from "./broadcast.js";
 import { transcribeVoice, WhisperNotConfiguredError } from "./whisper.js";
 import { toMarkdownV2 } from "./markdown-v2.js";
 
-// Telegram Bot API limits a single sendMessage to 4096 chars. Leave a small
-// safety margin so emojis/escapes don't push us over.
-const MAX_CHUNK = 4000;
+// Telegram Bot API limits a single sendMessage to 4096 chars. Chunking
+// happens BEFORE MarkdownV2 conversion (we need to split by structure first,
+// then escape each piece) so we leave generous headroom for escape expansion.
+// Russian / English prose normally adds 5–15% characters when MarkdownV2
+// escapes `.`, `!`, `(`, `)`, `-`, `#`, etc. — a 3500-char raw chunk worst-case
+// expands to ~4200 escaped chars, which is still under 4096 in practice for
+// our messages. The post-conversion length check below catches the rare
+// pathological case (mostly-special-chars text) and falls back to plain.
+const MAX_CHUNK = 3500;
+const TELEGRAM_HARD_LIMIT = 4096;
 
 let cached: Bot | null = null;
 let pollingStarted = false;
@@ -88,17 +95,27 @@ function chunk(text: string, size = MAX_CHUNK): string[] {
 export async function sendTelegramMessage(chatId: string, text: string): Promise<void> {
   const bot = getBot();
   for (const part of chunk(text)) {
-    try {
-      const formatted = toMarkdownV2(part);
-      await bot.api.sendMessage(chatId, formatted, { parse_mode: "MarkdownV2" });
-      console.log(`[telegram] → sent ${part.length} chars (mdv2) to ${chatId}`);
-    } catch (err) {
+    const formatted = toMarkdownV2(part);
+    // Skip the MarkdownV2 attempt entirely if escaping pushed the chunk past
+    // Telegram's 4096 limit — going straight to plain saves a guaranteed-400
+    // round-trip and matches what the catch fallback would do anyway.
+    const tryMarkdown = formatted.length <= TELEGRAM_HARD_LIMIT;
+    if (tryMarkdown) {
       try {
-        await bot.api.sendMessage(chatId, part);
-        console.log(`[telegram] → sent ${part.length} chars (plain fallback) to ${chatId}`);
-      } catch (plainErr) {
-        console.error(`[telegram] sendMessage to ${chatId} failed:`, plainErr);
+        await bot.api.sendMessage(chatId, formatted, { parse_mode: "MarkdownV2" });
+        console.log(`[telegram] → sent ${part.length} chars (mdv2) to ${chatId}`);
+        continue;
+      } catch (err) {
+        // Fall through to plain.
       }
+    }
+    try {
+      await bot.api.sendMessage(chatId, part);
+      console.log(
+        `[telegram] → sent ${part.length} chars (plain${tryMarkdown ? " fallback" : ", mdv2 too long"}) to ${chatId}`,
+      );
+    } catch (plainErr) {
+      console.error(`[telegram] sendMessage to ${chatId} failed:`, plainErr);
     }
   }
 }
