@@ -71,9 +71,13 @@ function tokenize(src: string): Token[] {
       const closeIdx = src.indexOf("```", afterTicks);
       if (closeIdx !== -1) {
         const block = src.slice(afterTicks, closeIdx);
+        // `nlIdx >= 0` so a leading newline (no language tag) splits cleanly
+        // into lang="" + code starting from after the newline. Using `> 0`
+        // would keep the leading `\n` in `code`, producing a blank line at
+        // the top of every untagged code block.
         const nlIdx = block.indexOf("\n");
-        const lang = nlIdx > 0 ? block.slice(0, nlIdx).trim() : "";
-        const code = nlIdx > 0 ? block.slice(nlIdx + 1) : block;
+        const lang = nlIdx >= 0 ? block.slice(0, nlIdx).trim() : "";
+        const code = nlIdx >= 0 ? block.slice(nlIdx + 1) : block;
         tokens.push({ type: "code_block", raw: src.slice(i, closeIdx + 3), inner: code, lang });
         i = closeIdx + 3;
         continue;
@@ -92,10 +96,14 @@ function tokenize(src: string): Token[] {
       }
     }
 
-    // Link: [text](url)
+    // Link: [text](url). Look for the FIRST `]`; if it's not immediately
+    // followed by `(`, this `[` doesn't open a link — fall through and
+    // escape it as plain text. Without this guard, an isolated `[name]`
+    // followed later by a real `[link](url)` got greedily merged into one
+    // giant hyperlink (the indexOf("](") jumped past the unrelated `]`).
     if (src[i] === "[") {
-      const closeBracket = src.indexOf("](", i);
-      if (closeBracket !== -1) {
+      const closeBracket = src.indexOf("]", i + 1);
+      if (closeBracket !== -1 && src[closeBracket + 1] === "(") {
         const closeParen = src.indexOf(")", closeBracket + 2);
         if (closeParen !== -1) {
           flush();
