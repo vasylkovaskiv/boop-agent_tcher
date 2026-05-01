@@ -489,7 +489,7 @@ The Claude Agent SDK natively respects `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TO
 # .env.local
 ANTHROPIC_API_KEY=sk-ant-...
 BOOP_MODEL=claude-sonnet-4-6           # or haiku-4-5 / opus-4-6
-# (no AGENTROUTER_API_KEY → classifier falls back to haiku, adversary stays on BOOP_MODEL)
+# (no AGENTROUTER_API_KEY → classifier falls back to haiku, adversary falls back to hardcoded haiku)
 ```
 
 This drops the GLM utility-routing optimization but keeps everything else identical. Classifier and adversary just both run on Claude.
