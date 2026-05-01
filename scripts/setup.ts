@@ -489,7 +489,15 @@ Options:
 
   const env: Record<string, string> = { ...existing, ...answers };
   delete (env as any).runConvex;
-  if (!env.PUBLIC_URL) env.PUBLIC_URL = `http://localhost:${env.PORT ?? "3456"}`;
+  // Localhost fallback is convenient for the "free ngrok" path (something has
+  // to live in PUBLIC_URL until the tunnel is up), but it must NOT clobber
+  // the explicit "polling-only" choice — that user opted out of public URLs
+  // entirely, and dev.mjs/server already treat empty/missing as "no public
+  // URL". Without this guard, the "none" path produced a .env.local
+  // indistinguishable from the "free ngrok" path.
+  if (!env.PUBLIC_URL && tunnelChoice !== "none") {
+    env.PUBLIC_URL = `http://localhost:${env.PORT ?? "3456"}`;
+  }
   // Clear stale / stub Convex values so `convex dev` can populate them freshly.
   // (`convex dev` uses .convex/ to identify the deployment, not these env vars.)
   if (env.CONVEX_URL?.includes("example.convex.cloud")) delete env.CONVEX_URL;

@@ -127,9 +127,18 @@ async function main() {
   // Boot the Telegram transport AFTER the HTTP server is listening so the
   // webhook receiver (if enabled) is ready before Telegram starts hitting it.
   if (telegramMode === "webhook") {
-    if (!stableUrl) {
+    // Telegram refuses to set a webhook to a non-public, non-HTTPS URL.
+    // scripts/setup.ts defaults PUBLIC_URL to http://localhost:<PORT> when
+    // the user doesn't pick a tunnel — that's truthy, but useless to Telegram.
+    // Match the localhost guard the proactive-watcher uses above so the warn
+    // actually fires and the user gets a clear hint instead of a swallowed 4xx.
+    const isUsable =
+      stableUrl &&
+      !stableUrl.includes("localhost") &&
+      !stableUrl.includes("127.0.0.1");
+    if (!isUsable) {
       console.warn(
-        "[telegram] TELEGRAM_MODE=webhook but PUBLIC_URL is not set — Telegram won't know where to deliver updates.",
+        "[telegram] TELEGRAM_MODE=webhook but PUBLIC_URL is not set or points at localhost — Telegram requires a public HTTPS URL for webhooks.",
       );
     } else {
       registerTelegramWebhook(stableUrl).catch((err) =>
