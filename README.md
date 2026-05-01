@@ -25,7 +25,7 @@ Built on:
 - [grammy](https://grammy.dev) — Telegram Bot API client
 - [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — optional self-hosted speech-to-text for voice notes
 - [Convex](https://convex.link/chrisraroque) — real-time database for memory, agents, drafts
-- Your [Claude Code](https://claude.com/code?ref=chrisraroque) subscription — no separate Anthropic API key required
+- [AgentRouter](https://agentrouter.org) (recommended) **or** direct [Anthropic API](https://docs.anthropic.com/en/api/getting-started) **or** your [Claude Code](https://claude.com/code?ref=chrisraroque) subscription — three supported routes for the LLM call
 
 ---
 
@@ -37,14 +37,15 @@ Built on:
 - **Pure dispatcher** — the interaction agent has only memory + spawn + automation + draft tools. Web access, files, and integrations are explicitly denied to it; sub-agents get `WebSearch` / `WebFetch` / the integrations.
 - **Tiered memory** (short / long / permanent) with post-turn extraction, decay, and cleaning.
 - **Vector search** for recall when you add an embeddings key (Voyage or OpenAI) — falls back to substring.
-- **Memory consolidation** — a daily 3-phase adversarial pipeline (proposer → adversary → judge) that merges duplicates, resolves contradictions, and prunes noise. Proposer and judge on Sonnet; adversary on Haiku for cheap skepticism. Runs every 24h by default, also triggerable manually via `POST /consolidate`.
+- **Memory consolidation** — a daily 3-phase adversarial pipeline (proposer → adversary → judge) that merges duplicates, resolves contradictions, and prunes noise. Proposer and judge on Claude (Anthropic format); adversary on a different family (GLM-5.1 by default when AgentRouter is configured) for genuine anti-echo-chamber skepticism. Runs every 24h by default, also triggerable manually via `POST /consolidate`.
 - **Automations** — the agent can schedule recurring work from a text ("every morning at 8 summarize my calendar") and push results back to Telegram.
 - **Draft-and-send** — any external action stages a draft first; the agent only commits when the user confirms.
 - **Heartbeat + retry** — stuck agents auto-fail, debug dashboard can retry.
 - **Composio-powered integrations** — one API key unlocks 1000+ toolkits. Connect Gmail, Slack, GitHub, Linear, Notion, Drive, HubSpot, etc. with a click from the debug dashboard. Composio handles OAuth + token refresh.
 - **Debug dashboard** (React + Vite) with a Boop mascot — Dashboard (spend + tokens + agent status), Agents (timeline + integration logos), Automations, Memory (table + force-directed graph), Events, Connections.
 - **Convex** for persistence — real-time, typed, free tier.
-- **Uses your Claude Code subscription** — no separate Anthropic API key required.
+- **Streaming Telegram replies** via the native `sendMessageDraft` API (Bot API 9.5+, March 2026) — text appears live as the model writes, no notification on the first frame, no "edited" tag on the final message. Toggle with `TELEGRAM_STREAMING`.
+- **Multi-provider model routing** — pick AgentRouter (one $150-credit account covers Claude + GLM + GPT + Qwen + DeepSeek + ~50 more), direct Anthropic, or piggyback on your Claude Code subscription. See the [Model routing](#model-routing) section below.
 - **Docker Compose + Traefik recipe** — deploy to a VPS with isolated `boop-net` for Node↔Whisper, `traefik-public` only when you need HTTPS for Composio webhooks, and Telegram polling that needs no inbound ports at all.
 
 <p align="center">
@@ -79,7 +80,7 @@ You need accounts for these. Keep the tabs open — setup will ask for credentia
 
 | Service | Why | Free? |
 |---|---|---|
-| [Claude Code](https://claude.com/code?ref=chrisraroque) | Powers the agent. Install it, sign in once, the SDK uses your session. | Subscription required |
+| One of: [AgentRouter](https://agentrouter.org), [Anthropic API](https://console.anthropic.com), or [Claude Code](https://claude.com/code?ref=chrisraroque) | Powers the agent. AgentRouter gives $150 free credits and unlocks Claude + GLM + GPT + Qwen + DeepSeek through one key (recommended for VPS deploys). Direct Anthropic is the most reliable. Claude Code piggybacks on your existing IDE subscription — fine for local dev only. | AgentRouter has a free tier; Anthropic is pay-as-you-go; Claude Code requires its own subscription |
 | [Telegram BotFather](https://t.me/BotFather) | Creates the bot token. Talk to `@BotFather`, send `/newbot`, copy the token. | Free |
 | [@userinfobot](https://t.me/userinfobot) | Tells you your numeric Telegram chat id (used for the allow-list and proactive notices). | Free |
 | [Convex](https://convex.link/chrisraroque) | Database + realtime. | Free tier is plenty |
@@ -98,9 +99,18 @@ git clone https://github.com/raroque/boop-agent.git
 cd boop-agent
 npm install
 
-# 2. Install Claude Code (one-time, global) and sign in
-npm install -g @anthropic-ai/claude-code
-claude  # sign in, then Ctrl-C to exit
+# 2. Pick a model provider (one of):
+#
+#    a) AgentRouter (recommended)
+#       Sign up at https://agentrouter.org → grab an API key → keep it handy.
+#       npm run setup will ask for it.
+#
+#    b) Direct Anthropic
+#       Get a key from https://console.anthropic.com
+#
+#    c) Claude Code subscription (local dev only)
+#       npm install -g @anthropic-ai/claude-code
+#       claude  # sign in, then Ctrl-C to exit
 
 # 3. Create a Telegram bot
 #    - Open https://t.me/BotFather, send /newbot, follow the prompts.
@@ -401,15 +411,134 @@ Example included: `.claude/skills/youtube-script-writer/`.
 
 ---
 
-## Using your Claude Code subscription
+## Model routing
 
-The Claude Agent SDK reuses the credentials Claude Code writes to your machine when you sign in. You do not need an `ANTHROPIC_API_KEY`.
+Boop makes ~7 different LLM calls per user turn — dispatcher, optional sub-agent, memory extract, occasional consolidation pipeline, occasional email classifier. Different jobs benefit from different models, and you have real choices about cost vs. quality vs. provider lock-in.
 
-- Install once: `npm install -g @anthropic-ai/claude-code`
-- Run `claude` in a terminal, sign in.
-- That's it — the SDK finds the session automatically.
+### The big picture
 
-If you'd prefer an API key (e.g. for a deployed server), set `ANTHROPIC_API_KEY` in `.env.local` and the SDK will use it instead.
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                            BOOP — model routing                           │
+│                                                                           │
+│  Hot path (every user turn — Anthropic Messages format, MCP tools):       │
+│  ┌──────────────────┐   ┌──────────────────┐   ┌──────────────────────┐   │
+│  │ Interaction      │   │ Execution        │   │ Memory extract       │   │
+│  │ agent            │   │ agent (sub)      │   │ (post-turn, async)   │   │
+│  │ BOOP_MODEL       │ → │ BOOP_MODEL       │ → │ BOOP_MODEL           │   │
+│  │ default haiku-4-5│   │ default haiku-4-5│   │ default haiku-4-5    │   │
+│  └────────┬─────────┘   └────────┬─────────┘   └────────┬─────────────┘   │
+│           │                      │                      │                  │
+│           └──────────────────────┴──────────────────────┘                  │
+│                                  ▼                                         │
+│           ┌────────────────────────────────────────────────────┐           │
+│           │   Anthropic-format endpoint (chooses one):         │           │
+│           │   ① ANTHROPIC_BASE_URL=https://agentrouter.org/    │           │
+│           │   ② ANTHROPIC_API_KEY=sk-ant-... (direct)          │           │
+│           │   ③ Claude Code subscription on your machine       │           │
+│           └────────────────────────────────────────────────────┘           │
+│                                                                            │
+│  Cold paths (occasional — OpenAI-compat format, no MCP):                  │
+│  ┌──────────────────────┐                ┌──────────────────────────┐     │
+│  │ Email classifier     │                │ Consolidation Adversary  │     │
+│  │ default glm-5.1      │                │ default glm-5.1          │     │
+│  │ fallback haiku       │                │ NO fallback              │     │
+│  │ BOOP_CLASSIFIER_MODEL│                │ BOOP_ADVERSARY_MODEL     │     │
+│  └──────────┬───────────┘                └────────────┬─────────────┘     │
+│             │                                          │                   │
+│             └──────────────────────┬───────────────────┘                   │
+│                                    ▼                                       │
+│              ┌──────────────────────────────────────────────────┐          │
+│              │   AGENTROUTER_BASE_URL=https://agentrouter.org/v1│          │
+│              │   AGENTROUTER_API_KEY=sk-...                     │          │
+│              │   (only path — these models aren't on Anthropic) │          │
+│              └──────────────────────────────────────────────────┘          │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+### What runs where, and why
+
+| Call site | File | Default model | Why this model | Override |
+|---|---|---|---|---|
+| **Interaction agent** (dispatcher) | `server/interaction-agent.ts` | `claude-haiku-4-5-20251001` | Anthropic Messages format is **mandatory** — MCP tools, prompt caching, the whole Agent SDK loop only speak this format. Haiku is the cheapest dispatcher Claude available on AgentRouter ($2.05/M prompt, $4.10/M completion). | `BOOP_MODEL`, or runtime `set_model` self-tool ("use sonnet", "switch to opus") |
+| **Execution agent** (sub-agent, spawned per task) | `server/execution-agent.ts` | inherits `BOOP_MODEL` | Same reason — MCP tool-calls. Sub-agent uses the dispatcher's chosen model unless overridden. | Same as dispatcher |
+| **Memory extract** (post-turn, fire-and-forget) | `server/memory/extract.ts` | inherits `BOOP_MODEL` | Same format constraints; runs async after every turn so cost scales linearly with traffic. Haiku keeps this cheap. | Same |
+| **Consolidation Proposer** (daily) | `server/consolidation.ts` | `BOOP_MODEL` | Reasoning-heavy: analyzes the whole memory store and proposes merges/superseds/prunes. Stays on Claude for quality. | `BOOP_MODEL` |
+| **Consolidation Adversary** (daily) | `server/consolidation.ts` | `glm-5.1` (when AgentRouter is set) else hardcoded `claude-haiku-4-5-20251001` | **Different model family is the point** — adversary's job is to challenge the proposer, and a Claude challenging a Claude tends to echo. GLM-5.1 from a different lineage gives genuine adversarial pressure. The fallback is intentionally hardcoded — keeps the adversary on a known cheap reasoning model regardless of what `BOOP_MODEL` is. **No fallback** on AgentRouter outage — the run is skipped, retried tomorrow. | `BOOP_ADVERSARY_MODEL` |
+| **Consolidation Judge** (daily) | `server/consolidation.ts` | `BOOP_MODEL` | Final arbiter. Stays on Claude for the same reasoning-quality reason as Proposer. | `BOOP_MODEL` |
+| **Email classifier** (each inbound Gmail event) | `server/proactive-email.ts` | `glm-5.1` (when AgentRouter is set) else `claude-haiku-4-5-20251001` | Simple binary "should we surface this email to the user?" task — GLM-5.1 is half-price ($2.05/M completion vs haiku's $4.10/M) and accurate enough. **Falls back to haiku** on AgentRouter outage — missed classifications mean missed user notifications, which we'd rather pay extra to avoid. | `BOOP_CLASSIFIER_MODEL` |
+
+### Three ways to provide credentials
+
+**① AgentRouter (recommended)** — one $150-credit account covers all the models above:
+
+```bash
+# .env.local
+ANTHROPIC_BASE_URL=https://agentrouter.org/
+ANTHROPIC_AUTH_TOKEN=sk-...           # AgentRouter API key
+ANTHROPIC_API_KEY=sk-...              # same key (Claude Agent SDK reads both)
+AGENTROUTER_API_KEY=sk-...            # same key (server/llm.ts reads this)
+BOOP_MODEL=claude-haiku-4-5-20251001
+```
+
+The Claude Agent SDK natively respects `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`, so all hot-path Claude calls route through AgentRouter without any code changes. `server/llm.ts` reads the OpenAI-compat endpoint at `https://agentrouter.org/v1` separately for GLM-5.1.
+
+**② Direct Anthropic API** — most reliable, no proxy hop:
+
+```bash
+# .env.local
+ANTHROPIC_API_KEY=sk-ant-...
+BOOP_MODEL=claude-sonnet-4-6           # or haiku-4-5 / opus-4-6
+# (no AGENTROUTER_API_KEY → classifier falls back to haiku, adversary falls back to hardcoded haiku)
+```
+
+This drops the GLM utility-routing optimization but keeps everything else identical. Classifier and adversary just both run on Claude.
+
+**③ Claude Code subscription** — local dev only, no env vars needed:
+
+```bash
+npm install -g @anthropic-ai/claude-code
+claude   # sign in once, Ctrl-C to exit
+```
+
+The Claude Agent SDK finds the session credentials Claude Code wrote to your machine. No `ANTHROPIC_API_KEY` needed. **Won't work in Docker** (the credentials live in the host user's home directory, not the container) — for VPS deploy you need ① or ②.
+
+### Available models
+
+The runtime registry is in `server/runtime-config.ts`. Aliases the in-bot `set_model` tool understands ("use opus", "switch to sonnet"):
+
+| Alias | Resolves to | Available on AgentRouter? | Available on direct Anthropic? |
+|---|---|---|---|
+| `haiku` / `haiku 4.5` | `claude-haiku-4-5-20251001` | ✅ ($2.05/$4.10 per M) | ✅ |
+| `sonnet` / `sonnet 4.6` | `claude-sonnet-4-6` | ❌ | ✅ |
+| `opus` / `opus 4.6` | `claude-opus-4-6` | ✅ ($21.53/$107.65 per M — pricey) | ✅ |
+| `opus 4.7` | `claude-opus-4-7` | ❌ | ✅ |
+
+GLM-5.1 lives in `server/llm.ts`'s separate registry — only reachable through AgentRouter, only used by the email classifier and consolidation adversary.
+
+### Cost ballpark on AgentRouter free tier ($150 credit)
+
+A typical user turn costs ~5K input + 350 output tokens × 2 LLM calls (dispatcher + extract).
+
+| Workload | Model | $/turn | $/day | $150 lasts |
+|---|---|---|---|---|
+| Light (10 turn/day) | haiku everywhere | ~$0.025 | $0.25 | ~600 days |
+| Moderate (30/day) | haiku everywhere | ~$0.025 | $0.75 | ~200 days |
+| Heavy (100/day) | haiku everywhere | ~$0.025 | $2.50 | ~60 days |
+| Moderate (30/day) | opus on dispatcher | ~$0.20 | $6 | ~25 days |
+| Moderate (30/day) | opus everywhere | ~$0.40 | $12 | ~12 days |
+
+GLM-5.1 on classifier/adversary nudges these numbers down by ~5–10% but isn't the lever — the dispatcher choice dominates. Default `BOOP_MODEL=claude-haiku-4-5-20251001` is the sweet spot.
+
+### Switching models at runtime
+
+The user can change the dispatcher model from any Telegram message — the dispatcher exposes a `set_model` self-tool (`server/self-tools.ts`):
+
+> "use opus"
+> "switch to haiku"
+> "переключись на sonnet"
+
+The new model id is written to the Convex `settings` table and takes precedence over `BOOP_MODEL`. The next user turn picks it up. No restart.
 
 ---
 
@@ -425,14 +554,20 @@ Everything lives in `.env.local` (auto-created by `npm run setup`). See `.env.ex
 | `TELEGRAM_MODE` | no | `polling` (default) or `webhook`. |
 | `BOOP_USER_TG_CHAT_ID` | for proactive notices | Chat id that receives proactive Gmail surfacing. Single-user assumption. |
 | `WHISPER_URL` | optional | Voice transcription endpoint. Blank = voice notes get a polite fallback. |
-| `BOOP_MODEL` | no | Default `claude-sonnet-4-6`. Used as the fallback when no runtime override is set. The user can switch the model at runtime from Telegram ("use opus", "switch to sonnet") via the `set_model` self-tool — that override is stored in the Convex `settings` table and takes precedence over this env var. |
+| `BOOP_MODEL` | no | Default `claude-haiku-4-5-20251001` — the cheapest Claude available on AgentRouter. Used by the dispatcher, sub-agents, memory extract, and consolidation Proposer/Judge. The user can switch the model at runtime from Telegram ("use opus", "switch to sonnet") via the `set_model` self-tool — the override is stored in the Convex `settings` table and takes precedence over this env var. See [Model routing](#model-routing). |
+| `ANTHROPIC_API_KEY` | one of these auth modes is required | Direct Anthropic API key (`sk-ant-...`). Leave blank if you're routing through AgentRouter or piggybacking on a Claude Code subscription. |
+| `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` | one of these auth modes is required | AgentRouter routing — set base to `https://agentrouter.org/` and auth token to your AgentRouter key. The Claude Agent SDK reads both natively. Set `ANTHROPIC_API_KEY` to the same value (some SDK code paths still read it). |
+| `AGENTROUTER_API_KEY` | optional | Enables the OpenAI-compat path used by GLM-5.1 (email classifier + consolidation adversary). Same key as `ANTHROPIC_AUTH_TOKEN` — AgentRouter accepts it on both endpoints. |
+| `AGENTROUTER_BASE_URL` | no | Defaults to `https://agentrouter.org/v1`. Override only if you self-host an OpenAI-compat proxy. |
+| `BOOP_CLASSIFIER_MODEL` | no | Override the email classifier model. When `AGENTROUTER_API_KEY` is set, defaults to `glm-5.1` with a haiku fallback; otherwise defaults to `claude-haiku-4-5-20251001`. |
+| `BOOP_ADVERSARY_MODEL` | no | Override the consolidation adversary model. When `AGENTROUTER_API_KEY` is set, defaults to `glm-5.1`; otherwise defaults to `claude-haiku-4-5-20251001`. **No fallback** on AgentRouter outage — the run is skipped. |
+| `TELEGRAM_STREAMING` | no | `true` (default) or `false`. When on, Boop streams the dispatcher's reply via the native `sendMessageDraft` Telegram API (Bot API 9.5+). Private chats only — groups always single-shot. |
 | `BOOP_UPSTREAM_CHECK` | no | Set to `false` to disable the new-version banner on `npm run dev`. Default: on. |
 | `PORT` | no | Default `3456`. |
 | `PUBLIC_URL` | only for Composio webhook or Telegram webhook mode | Base URL the outside world reaches the Node server on. |
 | `VOYAGE_API_KEY` **or** `OPENAI_API_KEY` | optional | Unlocks vector recall. Falls back to substring. |
 | `COMPOSIO_API_KEY` | optional | Enables integrations. Without it, plain chat + memory + automations still work. Get one at [app.composio.dev/developers](https://app.composio.dev/developers?utm_source=chris&utm_medium=youtube&utm_campaign=collab). |
 | `COMPOSIO_USER_ID` | optional | Stable user id Composio keys connections under. Defaults to `boop-default`. |
-| `ANTHROPIC_API_KEY` | optional | Bypass the Claude Code subscription. |
 
 ---
 

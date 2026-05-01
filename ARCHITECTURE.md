@@ -60,7 +60,7 @@ Three files, three jobs.
 
 **`tools.ts`** — the `boop-memory` MCP server. `recall` and `write_memory`. Each call emits a `memoryEvents` row so you can watch it live in the dashboard.
 
-**`extract.ts`** — fires post-turn, **fire-and-forget**. Sends `(userMsg, assistantReply)` to a Haiku/Sonnet pass with an extraction prompt, parses JSON facts, writes each one. The model is told to prefer fewer, higher-quality facts over many trivial ones.
+**`extract.ts`** — fires post-turn, **fire-and-forget**. Sends `(userMsg, assistantReply)` to a Claude pass (uses `BOOP_MODEL`, default `claude-haiku-4-5-20251001`) with an extraction prompt, parses JSON facts, writes each one. The model is told to prefer fewer, higher-quality facts over many trivial ones. Same Anthropic-format endpoint as the dispatcher — routes through AgentRouter, direct Anthropic, or Claude Code subscription depending on env config (see section 8 "Model routing" below).
 
 **`clean.ts`** — the memory-cleaning loop. Every 6 hours (configurable):
 
@@ -112,18 +112,98 @@ HTTP routes for the debug dashboard:
 
 ### 7. Consolidation — `server/consolidation.ts`
 
-Runs daily (or on-demand). A two-agent pipeline over the active memory set:
+Runs daily (or on-demand). A **three-agent adversarial pipeline** over the active memory set, deliberately routing different stages to different model families to avoid echo-chamber agreement:
 
-1. **Proposer** receives the full memory list and returns proposals:
+1. **Proposer** — model: `BOOP_MODEL` (Claude family). Receives the full memory list and returns proposals:
    - `merge` — combine several entries into one rewrite
    - `supersede` — newer memory replaces older on a conflicting value
    - `prune` — remove redundant or wrong entries
-2. **Judge** approves or rejects each proposal with a rationale.
-3. Approved proposals are applied via `supersedes` on `memoryRecords` (which archives the superseded memories automatically in the upsert mutation).
+2. **Adversary** — model: `BOOP_ADVERSARY_MODEL` (defaults to `glm-5.1` when `AGENTROUTER_API_KEY` is set, else falls back to a **hardcoded** `claude-haiku-4-5-20251001` — independent of `BOOP_MODEL`, so the adversary stays on a cheap second-opinion model even when the dispatcher is upgraded to sonnet/opus). A **different model family is the whole point** — a Claude challenging a Claude tends to politely agree; GLM-5.1 from a different lineage gives genuine objections. Receives the proposer's proposals + the original memory list and produces a `challenges[]` array with `{proposalIndex, severity, objection}`. **No fallback on AgentRouter outage** — if the OpenAI-compat call fails, the entire consolidation run is aborted (and retried tomorrow). Wasting one proposer/judge pair (~$0.04 of haiku tokens) is preferable to silently degrading the adversary into a same-family yes-man.
+3. **Judge** — model: `BOOP_MODEL` (Claude family). Receives proposals + adversary challenges + originals, decides per-proposal `{approve: bool, rationale: string}`.
+4. Approved proposals are applied via `supersedes` on `memoryRecords` (which archives the superseded memories automatically in the upsert mutation).
 
-Keeps memory sharper over time instead of noisier. The full run is logged in `consolidationRuns`.
+Keeps memory sharper over time instead of noisier. The full run is logged in `consolidationRuns`. Both the OpenAI-compat path (adversary on GLM) and the Anthropic-format path (proposer/judge on Claude) flow through `runLlm()` in `consolidation.ts`, which dispatches via `isOpenAICompatModel(model)` — see section 8 "Model routing" below for the full picture.
 
-### 8. Integrations — Composio (`server/composio.ts`)
+### 8. Model routing — `server/runtime-config.ts` + `server/llm.ts`
+
+Boop talks to LLMs via two completely separate transport stacks. They don't share clients, base URLs, or auth headers — only the choice of model decides which one a call goes through.
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│ Anthropic Messages format (MCP, prompt caching, tool_use blocks)        │
+│ Used by: interaction-agent · execution-agent · memory/extract ·         │
+│          consolidation Proposer · consolidation Judge                    │
+│ Client:  @anthropic-ai/claude-agent-sdk's query()                       │
+│ Auth:    ANTHROPIC_API_KEY (direct) OR                                  │
+│          ANTHROPIC_BASE_URL=https://agentrouter.org/                    │
+│           + ANTHROPIC_AUTH_TOKEN (proxied) OR                           │
+│          Claude Code session credentials on disk                        │
+│ Models:  claude-haiku-4-5-20251001 (default), claude-sonnet-4-6,        │
+│          claude-opus-4-6, claude-opus-4-7                               │
+└────────────────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────────────────────┐
+│ OpenAI-compat format (no MCP, plain chat completions)                   │
+│ Used by: proactive-email classifier · consolidation Adversary           │
+│ Client:  openai SDK (server/llm.ts → callOpenAILLM)                     │
+│ Auth:    AGENTROUTER_API_KEY + AGENTROUTER_BASE_URL                     │
+│ Models:  glm-5.1 (default for both call sites)                          │
+│          (the OpenAI-compat path is also where you'd add gpt-*,         │
+│           deepseek, qwen, etc. if you wanted them)                      │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+**Why two stacks at all?** The Claude Agent SDK only speaks Anthropic Messages format (MCP tool calls, `tool_use`/`tool_result` blocks, prompt caching all live in that format). GLM-5.1 doesn't speak Anthropic Messages — it speaks OpenAI Chat Completions. We could insert a proxy like LiteLLM to translate, but the lossy tool-call mapping and lost prompt caching make it a worse trade than just using the OpenAI client directly for the few calls that benefit from a non-Claude model.
+
+**`server/runtime-config.ts`** owns the dispatcher-side choice. `getRuntimeModel()` checks the Convex `settings` table first (so the in-bot `set_model` self-tool can override per-user-per-conversation), then falls back to `BOOP_MODEL`, then to the hardcoded default `claude-haiku-4-5-20251001`. `MODEL_ALIASES` lets the user say "use opus" or "switch to sonnet" — `resolveModelInput()` maps those to canonical model ids.
+
+**`server/llm.ts`** owns the OpenAI-compat client. It exports `callOpenAILLM({ model, systemPrompt, userPrompt, maxTokens? })` which:
+- POSTs to `${AGENTROUTER_BASE_URL}/chat/completions` with `Authorization: Bearer ${AGENTROUTER_API_KEY}`.
+- Maps the response's `usage.prompt_tokens` / `completion_tokens` into the same `UsageTotals` shape the Anthropic path produces, computing `costUsd` from the `PRICING_PER_M` table at the top of the file.
+- Returns `{ text, usage, durationMs }`.
+
+`isOpenAICompatModel(model: string): boolean` is the dispatch primitive. Both `consolidation.ts:runLlm()` and `proactive-email.ts` call it to decide whether to send a request through `callOpenAILLM` (OpenAI path) or through the Claude Agent SDK's `query()` (Anthropic path).
+
+**Failure modes are deliberately different per call site:**
+
+| Call site | On AgentRouter outage | Why |
+|---|---|---|
+| Email classifier | catch + log + retry on `claude-haiku-4-5-20251001` (Anthropic path) | A missed classification = a missed proactive notification to the user. We'd rather pay the haiku premium and still tell them about an important email. |
+| Consolidation Adversary | fail the entire run, retry tomorrow | The adversary's whole purpose is to be a different family from proposer/judge. Falling back to haiku turns it into a Claude challenging a Claude — defeats the point. The cost of one skipped daily run (~$0.04 of wasted proposer/judge tokens) is negligible. |
+
+See `server/proactive-email.ts:236-257` for the classifier fallback wrapper, and `server/consolidation.ts:125-140` for the adversary's no-fallback dispatch.
+
+**Cost recording.** `callOpenAILLM()` (in `server/llm.ts`) and `aggregateUsageFromResult()` (in `server/usage.ts`) produce structurally identical `UsageTotals` rows. The OpenAI path computes `costUsd` from `PRICING_PER_M[model]` at the top of `llm.ts`; the Anthropic path takes the SDK-reported `total_cost_usd` from the `result` message (authoritative against Anthropic's billing). Both flow into the same `usageRecords` Convex table (`source: "dispatcher"` / `"execution"` / `"classifier"` / `"consolidation-proposer"` / `"consolidation-adversary"` / `"consolidation-judge"` / `"memory-extract"`), so the Dashboard tab's spend tile sees one unified picture across both transport stacks.
+
+### 9. Streaming — `server/telegram-stream.ts`
+
+Replies stream live via Telegram's native `sendMessageDraft` API (Bot API 9.5+, March 2026). The dispatcher pushes incremental text chunks at `DEBOUNCE_MS=800` intervals with a `MIN_INTERVAL_MS=1000` floor between frames (Telegram throttles editMessage-style updates below ~1s); the user sees text appear progressively as the model writes — no notification on the first frame, no "edited" tag on the final commit.
+
+```
+interaction-agent.ts:
+  stream = createDraftStream(chatId)  // private chat only, else noopStream
+  for await (msg of query(...)) {
+    if (msg is text delta) stream.push(deltaText)
+    if (msg is new turn) stream.reset()  // pre-tool narration vs final reply
+  }
+  await stream.finalize(reply)  // sendMessage commits the draft
+```
+
+Key contract:
+- **`push(text)`**: appends to internal buffer, schedules a Telegram `sendMessageDraft` if no pending timer.
+- **`reset()`**: clears the buffer between turns so pre-tool acks ("Сейчас, секунду…") don't bleed into the final reply.
+- **`finalize(text)`**: cancels pending timer, sends `text` via plain `sendMessage` (which commits over the latest draft). **Always sends if not yet finalized**, even after `abort()` was called — this is intentional, motivated by an earlier silent-drop bug where the dispatcher's catch path called `abort()` then expected `finalize()` to deliver the error reply.
+- **`abort()`**: stops new draft frames. Does NOT prevent a subsequent `finalize()` from committing — abort is for clean cancellation of in-flight chunks, not for suppressing the final reply.
+
+Disabled paths (always single-shot via `noopStream`):
+- Group chats (Telegram API doesn't allow `sendMessageDraft` for groups).
+- Proactive turns (no inbound user message to respond to).
+- `TELEGRAM_STREAMING=false` env override.
+- Bot clients older than Bot API 9.5 — `sendMessageDraft` returns 400, swallowed; `finalize()` falls back to plain `sendMessage`.
+
+The streaming module is independent of the model routing module — it doesn't care whether tokens came from haiku-via-AgentRouter or sonnet-via-direct-Anthropic. It just consumes the dispatcher's output stream.
+
+### 10. Integrations — Composio (`server/composio.ts`)
 
 Boop delegates all third-party integrations to [Composio](https://composio.dev/?utm_source=chris&utm_medium=youtube&utm_campaign=collab). One SDK, 1000+ toolkits, hosted auth.
 
