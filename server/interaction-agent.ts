@@ -10,16 +10,16 @@ import { createDraftDecisionMcp } from "./draft-tools.js";
 import { createSelfMcp } from "./self-tools.js";
 import { getRuntimeModel } from "./runtime-config.js";
 import { broadcast } from "./broadcast.js";
-import { sendImessage } from "./sendblue.js";
+import { sendTelegramMessage } from "./telegram.js";
 import { aggregateUsageFromResult, EMPTY_USAGE, type UsageTotals } from "./usage.js";
 
-const INTERACTION_SYSTEM = `You are Boop, a personal agent the user texts from iMessage.
+const INTERACTION_SYSTEM = `You are Boop, a personal agent the user texts from Telegram.
 
 You are a DISPATCHER, not a doer. Your job:
 1. Understand what the user wants.
 2. Decide: answer directly (quick facts, chit-chat, anything you already know) OR spawn_agent (real work that needs tools like email, calendar, web, etc.).
 3. When you spawn, give the agent a crisp, specific task — not the raw user message.
-4. When the agent returns, relay the result in YOUR voice, tightened for iMessage.
+4. When the agent returns, relay the result in YOUR voice, tightened for Telegram.
 
 Tone: Warm, witty, concise. Write like you're texting a friend. No corporate voice. No bullet dumps unless the user asked for a list.
 
@@ -42,7 +42,7 @@ a tutorial, a how-to, any URL, or anything you'd be tempted to "just know" —
 spawn_agent. No exceptions. Even if you're 99% sure. The sub-agent has
 WebSearch/WebFetch and will return real citations; you don't and won't.
 
-Acknowledgment rule (iMessage UX):
+Acknowledgment rule (Telegram UX):
 BEFORE every spawn_agent call, you MUST call send_ack first with a short
 1-sentence message. The user otherwise sees nothing for 10-30 seconds while
 the sub-agent works. Examples of good acks:
@@ -93,7 +93,7 @@ When relaying a sub-agent's answer:
   add, remove, paraphrase, or summarize URLs.
 - If the sub-agent did NOT include a Sources section, YOU DO NOT ADD ONE.
   Do not write "Sources: Lonely Planet, etc." No exceptions.
-- You may tighten the body for iMessage (shorter bullets, fewer emojis),
+- You may tighten the body for Telegram (shorter bullets, fewer emojis),
   but the URLs are ground truth — don't touch them.
 
 Automations:
@@ -162,7 +162,7 @@ before saving.
 
 Available integrations for spawn_agent: {{INTEGRATIONS}}
 
-Format: Plain iMessage-friendly text. Markdown sparingly. Keep replies under ~400 chars when you can.`;
+Format: Plain Telegram-friendly text. Markdown sparingly. Keep replies under ~600 chars when you can; the hard limit is 4096.`;
 
 interface HandleOpts {
   conversationId: string;
@@ -217,14 +217,14 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
               content: [{ type: "text" as const, text: "Empty ack skipped." }],
             };
           }
-          // Skip the iMessage send for proactive turns — those go out as a
+          // Skip the Telegram send for proactive turns — those go out as a
           // single self-contained notice from dispatchProactiveNotice. If the
           // IA calls send_ack here on a proactive turn, the user would get
-          // two iMessages (the ack + the final reply). Still persist + log
-          // so the debug UI sees it.
-          if (opts.conversationId.startsWith("sms:") && opts.kind !== "proactive") {
-            const number = opts.conversationId.slice(4);
-            await sendImessage(number, text);
+          // two messages (the ack + the final reply). Still persist + log so
+          // the debug UI sees it.
+          if (opts.conversationId.startsWith("tg:") && opts.kind !== "proactive") {
+            const chatId = opts.conversationId.slice(3);
+            await sendTelegramMessage(chatId, text);
           }
           await convex.mutation(api.messages.send, {
             conversationId: opts.conversationId,
@@ -359,10 +359,10 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
     })) {
       if (msg.type === "assistant") {
         // Reset `reply` on each new assistant turn so only the LAST turn's
-        // text becomes the user-facing iMessage. Earlier turns are usually
+        // text becomes the user-facing Telegram message. Earlier turns are usually
         // pre-tool-call narration ("Got it — saving that now.") that, if
         // concatenated with the post-tool-result final text, sends as one
-        // smushed iMessage. Streaming via onThinking still sees everything.
+        // smushed Telegram message. Streaming via onThinking still sees everything.
         reply = "";
         for (const block of msg.message.content) {
           if (block.type === "text") {

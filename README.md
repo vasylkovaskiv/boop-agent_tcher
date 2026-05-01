@@ -4,30 +4,26 @@
 
 # Boop
 
-An iMessage-based personal agent built on top of the [Claude Agent SDK](https://docs.claude.com/en/api/agent-sdk/overview).
+A Telegram-based personal agent built on top of the [Claude Agent SDK](https://docs.claude.com/en/api/agent-sdk/overview), with optional voice transcription via a self-hosted Whisper sidecar.
 
-📺 **Watch the walkthrough:** [YouTube — How I built Boop](https://youtu.be/ZpmKjDDbqHs)
-
-<p align="center">
-  <img src="assets/imessage.jpg" alt="Boop replying inside iMessage" width="320" />
-  <br>
-  <sub><em>Boop in action — text it like a person, get back an answer with full context.</em></sub>
-</p>
+📺 **Watch the original walkthrough:** [YouTube — How I built Boop](https://youtu.be/ZpmKjDDbqHs)
+*(walkthrough is for the Sendblue/iMessage version; the architecture and dispatcher/executor split are unchanged — only the transport layer was swapped.)*
 
 > **This is a starting point, not a finished product.**
 > It's the architecture I built for my own personal agent, opened up as a template so you can take it, text-enable your own Claude, and extend it however you want. Integrations are plugged in via [Composio](https://composio.dev/?utm_source=chris&utm_medium=youtube&utm_campaign=collab) — drop in an API key and connect Gmail, Slack, GitHub, Linear, Notion, and ~1000 others straight from the debug dashboard.
 
 ```
- iMessage  →  Sendblue webhook  →  Interaction agent  →  Sub-agents (per task)
-                                          │                    │
-                                          ▼                    ▼
-                                    Memory store  ←──  Integrations (your MCP tools)
+ Telegram  →  bot (long-poll or webhook)  →  Interaction agent  →  Sub-agents (per task)
+                          │                          │                    │
+                          ▼                          ▼                    ▼
+              Whisper sidecar (voice)         Memory store  ←──  Integrations (your MCP tools)
 ```
 
 Built on:
 - [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-typescript) — the loop, tool use, sub-agents, MCP
 - [Composio](https://composio.dev/?utm_source=chris&utm_medium=youtube&utm_campaign=collab) — integrations layer. One API key = Gmail, Slack, GitHub, Linear, Notion, Stripe, Supabase, + ~1000 more with hosted OAuth
-- [Sendblue](https://sendblue.com/?utm_source=raroque) — iMessage in/out (free on their agent plan)
+- [grammy](https://grammy.dev) — Telegram Bot API client
+- [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — optional self-hosted speech-to-text for voice notes
 - [Convex](https://convex.link/chrisraroque) — real-time database for memory, agents, drafts
 - Your [Claude Code](https://claude.com/code?ref=chrisraroque) subscription — no separate Anthropic API key required
 
@@ -35,20 +31,21 @@ Built on:
 
 ## What you get
 
-- **iMessage in / iMessage out** via Sendblue (with typing indicators and webhook dedup).
-- **Sendblue CLI integration** — `npm run dev` auto-registers the inbound webhook for you every restart (no re-pasting into the dashboard when free ngrok rotates your URL).
+- **Telegram in / Telegram out** via `grammy`, with typing indicators and in-memory update dedup. Long-polling by default — no public URL or TLS needed for local dev.
+- **Voice notes (optional)** — point `WHISPER_URL` at the bundled Whisper sidecar (`whisper-service/`, FastAPI + faster-whisper) and Boop transcribes incoming voice messages before handing them to the agent. Falls back gracefully when Whisper is offline.
 - **Dispatcher + workers** pattern: a lean interaction agent decides what to do, spawns focused sub-agents that actually do the work.
 - **Pure dispatcher** — the interaction agent has only memory + spawn + automation + draft tools. Web access, files, and integrations are explicitly denied to it; sub-agents get `WebSearch` / `WebFetch` / the integrations.
 - **Tiered memory** (short / long / permanent) with post-turn extraction, decay, and cleaning.
 - **Vector search** for recall when you add an embeddings key (Voyage or OpenAI) — falls back to substring.
 - **Memory consolidation** — a daily 3-phase adversarial pipeline (proposer → adversary → judge) that merges duplicates, resolves contradictions, and prunes noise. Proposer and judge on Sonnet; adversary on Haiku for cheap skepticism. Runs every 24h by default, also triggerable manually via `POST /consolidate`.
-- **Automations** — the agent can schedule recurring work from a text ("every morning at 8 summarize my calendar") and push results back to iMessage.
+- **Automations** — the agent can schedule recurring work from a text ("every morning at 8 summarize my calendar") and push results back to Telegram.
 - **Draft-and-send** — any external action stages a draft first; the agent only commits when the user confirms.
 - **Heartbeat + retry** — stuck agents auto-fail, debug dashboard can retry.
 - **Composio-powered integrations** — one API key unlocks 1000+ toolkits. Connect Gmail, Slack, GitHub, Linear, Notion, Drive, HubSpot, etc. with a click from the debug dashboard. Composio handles OAuth + token refresh.
 - **Debug dashboard** (React + Vite) with a Boop mascot — Dashboard (spend + tokens + agent status), Agents (timeline + integration logos), Automations, Memory (table + force-directed graph), Events, Connections.
 - **Convex** for persistence — real-time, typed, free tier.
 - **Uses your Claude Code subscription** — no separate Anthropic API key required.
+- **Docker Compose + Traefik recipe** — deploy to a VPS with isolated `boop-net` for Node↔Whisper, `traefik-public` only when you need HTTPS for Composio webhooks, and Telegram polling that needs no inbound ports at all.
 
 <p align="center">
   <img src="assets/agents-view.jpg" alt="Agents view in the Boop debug dashboard" width="900" />
@@ -71,54 +68,23 @@ Built on:
 <p align="center">
   <img src="assets/connections.jpg" alt="Connections view in the Boop debug dashboard" width="900" />
   <br>
-  <sub><em>Connections tab — Composio toolkits with OAuth handled for you. Click Connect and the agent can use it on the next message.</em></sub>
+  <sub><em>Connections tab — pick from a curated catalog of Composio toolkits and connect with one click.</em></sub>
 </p>
 
 ---
 
-## Heads up before you use this
-
-- **This was never meant to be open-sourced.** I built it for personal use and decided to share the architecture after enough people asked. It's not a product.
-- **Not optimized for cost or security.** Use at your own risk. Review the code, set your own budgets, and don't trust it with anything you wouldn't trust yourself with.
-- **I'm open to PRs for optimizations** — performance, bug fixes, DX improvements, new example integrations, better docs.
-
----
-
-## Why is it named Boop?
-
-<p align="center">
-  <img src="assets/luna.jpeg" alt="Luna" width="220" />
-  <br>
-  <sub><em>Luna, the inspiration.</em></sub>
-</p>
-
-Boop is meant to be a proactive agent — one that nudges you over iMessage with reminders, drafts, and little follow-ups. A small "boop" whenever it has something for you.
-
-And it's named after my dog, Luna, who gives plenty of them.
-
----
-
-## A note on the native iOS app
-
-I'm working on open-sourcing the native iOS app I originally built for this. The rewrite is taking much longer to get right than I'd hoped, but it will happen. I don't personally use it anymore — but enough people have asked, and I want to make it happen.
-
-If you want to see what it looked like before I transitioned to an iMessage-based agent, here's [the walkthrough on YouTube](https://www.youtube.com/watch?v=_h2EnRfxMQE).
-
----
-
-## Prerequisites
+## What you'll need
 
 You need accounts for these. Keep the tabs open — setup will ask for credentials from each.
 
-> **You should be able to get away with the free plan for each service (except Claude Code), and I'm working to secure discounts for you guys on the pro plans. If you work at any of these companies, please reach out!**
-
-| Service | Why | Free? | Discount code |
-|---|---|---|---|
-| [Claude Code](https://claude.com/code?ref=chrisraroque) | Powers the agent. Install it, sign in once, the SDK uses your session. | Subscription required | Working on getting one (if you work here, please reach out!) |
-| [Sendblue](https://sendblue.com/?utm_source=raroque) | iMessage bridge. Get a number, grab API keys. | Free on their agent plan | `RAROQUE20` — 20% off for 6 months (helpful if you plan to commercialize) |
-| [Convex](https://convex.link/chrisraroque) | Database + realtime. | Free tier is plenty | Working on getting one (in touch with them 👀) |
-| [Composio](https://composio.dev/?utm_source=chris&utm_medium=youtube&utm_campaign=collab) | Integrations — one API key unlocks ~1000 toolkits. Optional if you just want chat + memory + automations without third-party access. | Free tier covers personal use | `CHRISXCOMPOSIO` — 1 month free on starter plan |
-| [ngrok](https://ngrok.com?ref=chrisraroque) or similar | Expose your local port so Sendblue can reach it. | Free tier works | Working on getting one (if you work here, please reach out!) |
+| Service | Why | Free? |
+|---|---|---|
+| [Claude Code](https://claude.com/code?ref=chrisraroque) | Powers the agent. Install it, sign in once, the SDK uses your session. | Subscription required |
+| [Telegram BotFather](https://t.me/BotFather) | Creates the bot token. Talk to `@BotFather`, send `/newbot`, copy the token. | Free |
+| [@userinfobot](https://t.me/userinfobot) | Tells you your numeric Telegram chat id (used for the allow-list and proactive notices). | Free |
+| [Convex](https://convex.link/chrisraroque) | Database + realtime. | Free tier is plenty |
+| [Composio](https://composio.dev/?utm_source=chris&utm_medium=youtube&utm_campaign=collab) | Integrations — one API key unlocks ~1000 toolkits. Optional if you just want chat + memory + automations without third-party access. | Free tier covers personal use — `CHRISXCOMPOSIO` gives 1 month free on starter |
+| ngrok / Cloudflare Tunnel (optional) | Only needed for **Composio webhook** (proactive Gmail) or **Telegram webhook mode**. Polling-mode Telegram needs neither. | Free tier works |
 
 **Custom integrations welcome.** Composio covers the common catalog, but you're free to add your own MCP servers under `server/integrations/` and register them in `server/integrations/registry.ts` — the dispatcher treats them the same as Composio-backed ones (just named toolkits the execution agent can spawn against). Useful for in-house APIs, local tools, or anything Composio doesn't ship.
 
@@ -136,149 +102,250 @@ npm install
 npm install -g @anthropic-ai/claude-code
 claude  # sign in, then Ctrl-C to exit
 
-# 3. Interactive setup — writes .env.local, creates Convex deployment
+# 3. Create a Telegram bot
+#    - Open https://t.me/BotFather, send /newbot, follow the prompts.
+#      Save the token (looks like 1234567:AAH...).
+#    - Open https://t.me/userinfobot to learn your numeric chat id.
+
+# 4. Interactive setup — writes .env.local, creates Convex deployment
 npm run setup
 
-# 4. Install ngrok (one-time) and authorize it
-brew install ngrok
-# or grab from https://ngrok.com/download
-ngrok config add-authtoken <your-token>   # free at https://dashboard.ngrok.com
-
-# 5. Start everything with one command — server, Convex, debug UI, and ngrok
+# 5. Start everything with one command — server, Convex watcher, debug UI
 npm run dev
 ```
 
-`npm run dev` prints color-prefixed output from all four processes and shows a banner with your ngrok webhook URL once the tunnel is live.
+`npm run dev` prints color-prefixed output from each child process and shows a banner once the bot is connected:
 
 ```
-Public URL:        https://<abc123>.ngrok.app
-Sendblue webhook:  https://<abc123>.ngrok.app/sendblue/webhook
+════════════════════════════════════════════════════════════════════
+  Boop is ready — Telegram polling is live.
+
+  🐶 Debug dashboard:        http://localhost:5173
+  🤖 Telegram bot:           @your_bot_username
+  📞 Allow-listed chat ids:  123456789
+════════════════════════════════════════════════════════════════════
 ```
 
-On free ngrok, **the webhook auto-registers with Sendblue every boot** — no manual paste needed. For stable URLs (ngrok reserved or Cloudflare Tunnel), set the webhook once in the dashboard.
+Open Telegram, message your bot — it replies. Send a voice note and (with `WHISPER_URL` set) it gets transcribed first.
 
-Text your Sendblue-provisioned number from a **different** phone. The agent replies.
+> **Lock down the bot.** Until you set `TELEGRAM_ALLOWED_CHAT_IDS` in `.env.local`, anyone who finds your bot's username can chat with it and burn your Claude tokens. `npm run setup` adds your own chat id automatically — verify it landed in `.env.local`.
 
-> **⚠ ngrok free plan gives you a new URL every time.** That means every time you restart `npm run dev`, your Sendblue webhook URL is dead until you paste the new one in.
->
-> If you're going to run this for more than a quick demo, **strongly recommend one of:**
-> - **ngrok paid plan** — gives you a reserved domain that stays the same forever
-> - **[Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)** — free, stable subdomain, a bit more setup
-> - Any other tunnel with a static URL (Tailscale Funnel, localtunnel reserved, etc.)
->
-> If you use a non-ngrok tunnel, point it at `localhost:3456` yourself — `npm run dev` will still run the rest, just ignore its ngrok output and use your tunnel's URL.
+> **Voice transcription is opt-in.** With `WHISPER_URL` blank, Boop just replies "Voice transcription isn't enabled — please send text." instead of trying to transcribe. To enable, see [Voice transcription](#voice-transcription-whisper-sidecar) below.
 
-> **Gotcha:** `SENDBLUE_FROM_NUMBER` must be your Sendblue-provisioned number (the one people text TO), not your personal cell. Sendblue's API requires it, and misconfiguring it returns either "missing required parameter: from_number" or "Cannot send messages to self".
->
-> **Fix in one command:** `npm run sendblue:sync` pulls the right number from the Sendblue CLI and writes it to `.env.local`.
+> **Need a public URL?** Polling Telegram needs none. You only need a tunnel for **Composio webhook** (proactive Gmail notifications) or **`TELEGRAM_MODE=webhook`**. Free ngrok / Cloudflare Tunnel both work — see [Public URL setups](#public-url-setups) below.
 
 ---
 
-## How the Sendblue integration works
+## How the Telegram integration works
 
-Boop uses the [Sendblue CLI](https://github.com/sendblue-api/sendblue-cli) (`@sendblue/cli`) to eliminate almost all manual dashboard work. Three NPM scripts wrap it:
+`server/telegram.ts` encapsulates everything: a singleton `Bot` instance from `grammy`, the inbound update handler with chat-id allow-list + voice transcription, and both polling and webhook lifecycles. The rest of the codebase only sees four exports:
 
-| Command | What it does |
+| Export | Purpose |
 |---|---|
-| `npm run setup` | Interactive. Offers to run `sendblue login` / `sendblue setup` and pulls `api_key_id` + `api_secret_key` from `sendblue show-keys` into `.env.local`. |
-| `npm run sendblue:sync` | Runs `sendblue lines`, parses your provisioned phone number, and writes `SENDBLUE_FROM_NUMBER` to `.env.local` in E.164 format. Run this anytime your number changes or got set wrong. |
-| `npm run sendblue:webhook -- <url>` | Runs `sendblue webhooks list`, removes stale ngrok/tunnel hooks, and adds `<url>` as a `type=receive` inbound webhook. Called automatically by `npm run dev`. |
+| `sendTelegramMessage(chatId, text)` | Outbound. Chunks at 4000 chars (Telegram caps at 4096). Used by the dispatcher, automations, and proactive-email surfacing. |
+| `startTypingLoop(chatId)` | Sends `typing` action every 4s until you call the returned `stop()`. |
+| `startTelegramPolling()` | Long-polling lifecycle — outbound only, no inbound ports. Default. |
+| `createTelegramWebhookRouter()` + `registerTelegramWebhook(publicUrl)` | Webhook lifecycle — Express router for `/telegram/webhook` plus a one-shot registration call. Pick this when you have stable HTTPS and want to skip polling overhead. |
 
-### The `npm run dev` lifecycle
+### Conversation ids
 
-```
- 1. Preflight: confirm convex/_generated/ exists (else prompt to run setup).
- 2. Spawn four children in parallel, each with a prefixed log stream:
-       server │   (tsx watch server/index.ts)
-       convex │   (npx convex dev — pushes schema + functions)
-       debug  │   (vite dev server on :5173)
-       ngrok  │   (if installed AND no static URL) exposes :PORT
- 3. Wait for all four readiness signals:
-       server → "listening on :PORT"
-       convex → "Convex functions ready"
-       debug  → "Local:  http://localhost:5173/"
-       ngrok  → tunnel URL visible at http://127.0.0.1:4040
- 4. Auto-register the webhook (FREE ngrok only, not reserved domains):
-       webhook │ [webhook] removed stale https://old.ngrok-free.app/sendblue/webhook
-       webhook │ [webhook] registered https://new.ngrok-free.app/sendblue/webhook (type=receive)
- 5. Show the banner with dashboard + public URL + your Sendblue number.
-```
+Conversations are keyed in Convex by an opaque string. Telegram conversations use `tg:<chat_id>` (e.g. `tg:123456789`). The chat-id-only model is intentionally simpler than the previous `sms:+1...` one — Telegram chat ids are stable per chat (private DM, group, supergroup), and supergroups carry a different sign than DMs so collisions don't happen.
 
-The banner will look like:
+### Polling lifecycle
 
 ```
-════════════════════════════════════════════════════════════════════
-  Boop is ready — ngrok tunnel is live  (webhook auto-registered).
-
-  🐶 Debug dashboard (click me):   http://localhost:5173
-  🌐 Public URL:                   https://abc123.ngrok-free.app
-  📮 Sendblue webhook (inbound):   https://abc123.ngrok-free.app/sendblue/webhook
-  📱 Text this Sendblue number:    +13053369541  (from a DIFFERENT phone)
-════════════════════════════════════════════════════════════════════
+ 1. Server boots, reads TELEGRAM_BOT_TOKEN.
+ 2. grammy connects to api.telegram.org and starts long-poll loop.
+ 3. Each update flows through the in-memory dedup set (last 1000 update_ids),
+    chat-id allow-list check, then handleUpdate().
+ 4. Voice messages are downloaded via getFile() → sent to WHISPER_URL → text
+    is fed to handleUserMessage() like any other text.
+ 5. SIGINT cleanly stops the bot before exiting.
 ```
 
-### When auto-register fires vs when it doesn't
+### Webhook lifecycle (optional)
 
-| Setup | Auto-register fires? | Why |
-|---|---|---|
-| Free ngrok (default) | **Yes**, every boot | URL rotates; dashboard would be stale otherwise |
-| Reserved `NGROK_DOMAIN` | No | URL is stable; configure once in Sendblue dashboard |
-| Static `PUBLIC_URL` (Cloudflare Tunnel etc.) | No | Same reason |
-| `SENDBLUE_AUTO_WEBHOOK=false` | No | Manual opt-out |
+When `TELEGRAM_MODE=webhook` and `PUBLIC_URL` is set, Boop:
+
+1. Mounts `POST /telegram/webhook` on the Express server.
+2. Calls `bot.api.setWebhook(<PUBLIC_URL>/telegram/webhook)` once on startup.
+3. Lets Telegram push updates instead of polling.
+
+Use this only when you want to skip the long-poll connection or when polling is somehow blocked. Polling is simpler operationally — no DNS, no TLS, no firewall, no clock skew issues.
 
 ### What you'll see in the server logs during a conversation
 
-When someone texts your Sendblue number, expect this sequence in your terminal:
-
 ```
-server │ [turn a3f21d] ← +14155551234: "what's on my calendar today?"
+server │ [telegram] update 102345 from chat 123456789: "what's on my calendar today?"
+server │ [turn a3f21d] ← tg:123456789: "what's on my calendar today?"
 server │ [turn a3f21d] tool: recall({"query":"calendar today"})
 server │ [turn a3f21d] tool: spawn_agent({"integrations":["google-calendar"],"task":"Pull today's events"})
 server │ [agent 9e82c1] spawn: google-calendar [google-calendar] — "Pull today's events"
 server │ [agent 9e82c1] tool: list_events
 server │ [agent 9e82c1] done (completed, 2.1s, in/out tokens 1234/567)
 server │ [turn a3f21d] → reply (3.4s, 140 chars): "Light day — just your 2pm with Sarah..."
-server │ [sendblue] → sent 140 chars to +14155551234
+server │ [telegram] → sent 140 chars to chat 123456789
 ```
-
-Per-line anatomy:
-
-- **`[turn xxxxxx]`** — one iMessage round trip. Same id across `←` (incoming) → tool calls → `→ reply` → `[sendblue] sent`.
-- **`[agent xxxxxx]`** — a spawned execution agent. Shows `spawn`, each `tool:` it invokes, and `done` with timing + token counts.
-- **`[sendblue]`** — outbound send results. If Sendblue rejects, the error body is logged with a hint about the likely cause (from_number mismatch, self-send, etc.).
 
 The same events are written to Convex (`messages`, `executionAgents`, `agentLogs`, `memoryEvents` tables) and streamed to the debug dashboard in real time.
 
-### When to re-run each Sendblue script
+---
 
-- **First time / after losing `.env.local`** → `npm run setup` (walks through Sendblue + Convex together)
-- **Phone number looks wrong in the banner** → `npm run sendblue:sync`
-- **Webhook went stale in the dashboard and auto-register is off** → `npm run sendblue:webhook -- https://your-url.example.com/sendblue/webhook`
+## Voice transcription (Whisper sidecar)
 
-### Disabling auto-register
-
-Add to `.env.local`:
+Boop ships a small Python sidecar in [`whisper-service/`](./whisper-service/) — FastAPI + [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — that exposes one endpoint:
 
 ```
-SENDBLUE_AUTO_WEBHOOK=false
+POST /transcribe
+{ "url": "https://api.telegram.org/file/bot.../voice.oga" }
+
+→ { "text": "...", "language": "en", "duration": 4.7 }
 ```
 
-`npm run dev` will still show you the webhook URL in the banner so you can paste it yourself.
+The Node server calls it whenever a Telegram voice / audio message arrives. If `WHISPER_URL` is empty or the call fails, Boop replies with a polite fallback message instead of crashing.
 
-Visit `http://localhost:5173` for the debug dashboard (chat, agents, memory, events). You can also chat from the dashboard's Chat tab without Sendblue.
+### Local dev
 
-**This is the full first-run.** You now have a working agent that chats, remembers, and schedules reminders. Enable integrations (Gmail, Calendar, Notion, Slack) when you want more — see the next section.
+```bash
+cd whisper-service
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app:app --host 127.0.0.1 --port 9000
+```
+
+Then in `.env.local`:
+```
+WHISPER_URL=http://127.0.0.1:9000/transcribe
+WHISPER_MODEL=small        # small (~1GB), medium (~2.5GB), large-v3 (~5GB)
+WHISPER_COMPUTE=int8        # int8 (CPU), float16 (GPU)
+WHISPER_LANGUAGE=           # blank = auto-detect
+```
+
+### On the VPS (Docker Compose)
+
+The bundled `docker-compose.yml` runs Whisper as an isolated container on `boop-net` with no external port, talking to the Node container at `http://whisper:9000/transcribe`. See [Deploy to your VPS](#deploy-to-your-vps).
+
+### Memory footprint cheatsheet
+
+| Model | Approx RAM | Approx speed (CPU) | Quality |
+|---|---|---|---|
+| `tiny`   | 200 MB | ~10× realtime | rough — fine for short commands |
+| `base`   | 400 MB | ~7×  | OK |
+| `small`  | 1 GB   | ~5×  | sweet spot for most users |
+| `medium` | 2.5 GB | ~2×  | recommended on a 7+ GB VPS |
+| `large-v3` | 5 GB | ~0.5× | best quality, needs swap or a beefy box |
+
+---
+
+## Public URL setups
+
+You only need a public URL for:
+1. **Composio webhook** (proactive Gmail notifications), or
+2. `TELEGRAM_MODE=webhook` (rare — polling is simpler).
+
+Polling Telegram + no Composio webhook = no public URL needed at all.
+
+When you do need one, options ranked by setup cost:
+
+| Setup | Public URL stable across restarts? | Notes |
+|---|---|---|
+| **Free ngrok** | No — rotates each boot | `npm run dev` starts ngrok automatically if installed. The new URL is in the boot banner. |
+| **ngrok reserved domain** (paid) | Yes | Set `NGROK_DOMAIN=boop.ngrok.app` in `.env.local`. |
+| **Cloudflare Tunnel** | Yes, free | Set `PUBLIC_URL=https://boop.your-domain.com` and run `cloudflared` yourself. |
+| **Traefik on a VPS** | Yes | Use the bundled `docker-compose.yml` — Traefik handles Let's Encrypt automatically. |
+
+> **Composio auto-register.** When you have `COMPOSIO_API_KEY` set and a public URL, `npm run dev` re-registers the Composio webhook subscription with the current URL on each boot. Set `COMPOSIO_AUTO_WEBHOOK=false` to opt out.
+
+---
+
+## Deploy to your VPS
+
+The repo includes a Docker Compose recipe targeting a VPS that already runs Traefik with the `traefik-public` external network and Let's Encrypt automation (the typical pattern from the OVH / Hetzner / Contabo Ubuntu 24.04 setups).
+
+```
+boop-agent/
+├── Dockerfile               # Node 20 boop image
+├── docker-compose.yml       # boop + whisper, two networks, Traefik labels
+└── whisper-service/
+    └── Dockerfile           # Python 3.11 + faster-whisper
+```
+
+**Two networks:**
+- `boop-net` (internal) — boop ↔ whisper. Whisper is unreachable from outside the host.
+- `traefik-public` (external, opt-in) — only attached to `boop` when you need Composio webhook or Telegram webhook mode.
+
+**Unique Traefik names** (so you don't collide with your other projects on the same Traefik):
+- routers: `boop-router-composio`, `boop-router-telegram`
+- service: `boop-svc`
+- middleware: `boop-auth` (basicauth, only if you expose the debug UI)
+- containers: `boop-agent`, `boop-whisper`
+- compose project: `name: boop`
+
+### Quickstart on the VPS
+
+```bash
+# 1. Clone
+git clone https://github.com/<you>/boop-agent.git
+cd boop-agent
+
+# 2. Fill in .env.local (copy from .env.example, then edit)
+cp .env.example .env.local
+# At minimum: TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_CHAT_IDS,
+#             BOOP_USER_TG_CHAT_ID, CONVEX_URL, COMPOSIO_API_KEY (optional)
+# Set WHISPER_URL=http://whisper:9000/transcribe to use the sidecar.
+
+# 3. Build + run
+docker compose up -d --build
+
+# 4. Watch logs
+docker compose logs -f boop
+```
+
+Polling mode requires no inbound DNS or firewall rules — boop reaches Telegram outbound on TCP/443.
+
+### Memory + swap on a 7-8 GB VPS
+
+faster-whisper with `medium` peaks around 2.5–3 GB. Add 4 GB of swap for headroom:
+
+```bash
+sudo fallocate -l 4G /swapfile
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile
+sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+```
+
+### Updating
+
+```bash
+git pull
+docker compose up -d --build
+```
+
+The Whisper image is pulled rarely; Compose only rebuilds it if `whisper-service/` changed.
+
+### Convex schema migration note
+
+This release **removes** the `sendblueDedup` table from `convex/schema.ts`. If you're upgrading from an older version that had data in that table, delete the table from the Convex dashboard (or write a one-shot mutation that walks `db.query("sendblueDedup")` and deletes each row) **before** `npx convex deploy` — Convex will refuse to push a schema that drops a non-empty table.
 
 ---
 
 ## Architecture in 30 seconds
 
 ```
-┌─────────────┐    webhook     ┌─────────────────────┐
-│   iMessage  │ ─────────────► │ Sendblue → /webhook │
+┌─────────────┐    update      ┌─────────────────────┐
+│   Telegram  │ ─────────────► │ grammy (poll/hook)  │
 └─────────────┘                └──────────┬──────────┘
                                           │
-                                          ▼
+                       ┌──────────────────┼──────────────┐
+                       │                  ▼              │
+                       │       ┌────────────────────┐    │
+                       │       │ Whisper sidecar    │    │
+                       │       │ (voice → text)     │    │
+                       │       └─────────┬──────────┘    │
+                       │                 │ (text)        │
+                       └─────────────────┼───────────────┘
+                                         ▼
                           ┌────────────────────────────┐
                           │    Interaction agent       │
                           │    (dispatcher only)       │
@@ -288,11 +355,11 @@ Visit `http://localhost:5173` for the debug dashboard (chat, agents, memory, eve
                                    │        │
                    ┌───────────────┘        └──────────────┐
                    ▼                                       ▼
-           ┌───────────────┐                      ┌──────────────┐
-           │   Memory      │                      │  Execution   │
-           │ (Convex)      │                      │  agent(s)    │
+           ┌───────────────┐                      ┌────────────────┐
+           │   Memory      │                      │  Execution     │
+           │ (Convex)      │                      │  agent(s)      │
            │ + cleaning    │                      │  + integrations│
-           └───────────────┘                      └──────────────┘
+           └───────────────┘                      └────────────────┘
 ```
 
 - **Interaction agent** (`server/interaction-agent.ts`) is the front door. It reads the user's message + recent history, optionally calls `recall`, writes memories, creates automations, and decides whether to answer directly or spawn a sub-agent.
@@ -330,8 +397,6 @@ description: Write a tight, retention-focused YouTube script from a topic or out
 <instructions the agent follows when this skill is invoked>
 ```
 
-There's a soft budget (~15k chars by default, via `SLASH_COMMAND_TOOL_CHAR_BUDGET`) for the combined skill-description block in context — if you end up with many skills, keep descriptions sharp so none get truncated.
-
 Example included: `.claude/skills/youtube-script-writer/`.
 
 ---
@@ -355,12 +420,15 @@ Everything lives in `.env.local` (auto-created by `npm run setup`). See `.env.ex
 | Var | Required | Notes |
 |---|---|---|
 | `CONVEX_URL` / `VITE_CONVEX_URL` | yes | Convex deployment URL. Written by `npx convex dev`. |
-| `SENDBLUE_API_KEY` / `SENDBLUE_API_SECRET` | yes | From your Sendblue dashboard. |
-| `SENDBLUE_FROM_NUMBER` | yes | Your Sendblue-provisioned number. |
-| `BOOP_MODEL` | no | Default `claude-sonnet-4-6`. Used as the fallback when no runtime override is set. The user can switch the model at runtime from iMessage ("use opus", "switch to sonnet") via the `set_model` self-tool — that override is stored in the Convex `settings` table and takes precedence over this env var. |
+| `TELEGRAM_BOT_TOKEN` | yes | From `@BotFather`. |
+| `TELEGRAM_ALLOWED_CHAT_IDS` | yes (in production) | Comma-separated allow-list of numeric chat ids. Without it the bot answers anyone — fine for local testing, dangerous on a public bot. |
+| `TELEGRAM_MODE` | no | `polling` (default) or `webhook`. |
+| `BOOP_USER_TG_CHAT_ID` | for proactive notices | Chat id that receives proactive Gmail surfacing. Single-user assumption. |
+| `WHISPER_URL` | optional | Voice transcription endpoint. Blank = voice notes get a polite fallback. |
+| `BOOP_MODEL` | no | Default `claude-sonnet-4-6`. Used as the fallback when no runtime override is set. The user can switch the model at runtime from Telegram ("use opus", "switch to sonnet") via the `set_model` self-tool — that override is stored in the Convex `settings` table and takes precedence over this env var. |
 | `BOOP_UPSTREAM_CHECK` | no | Set to `false` to disable the new-version banner on `npm run dev`. Default: on. |
 | `PORT` | no | Default `3456`. |
-| `PUBLIC_URL` | no | Base URL used in the Sendblue webhook. Composio handles its own OAuth callbacks on `platform.composio.dev`, so this is just for inbound iMessage. |
+| `PUBLIC_URL` | only for Composio webhook or Telegram webhook mode | Base URL the outside world reaches the Node server on. |
 | `VOYAGE_API_KEY` **or** `OPENAI_API_KEY` | optional | Unlocks vector recall. Falls back to substring. |
 | `COMPOSIO_API_KEY` | optional | Enables integrations. Without it, plain chat + memory + automations still work. Get one at [app.composio.dev/developers](https://app.composio.dev/developers?utm_source=chris&utm_medium=youtube&utm_campaign=collab). |
 | `COMPOSIO_USER_ID` | optional | Stable user id Composio keys connections under. Defaults to `boop-default`. |
@@ -452,29 +520,35 @@ Upgrade path when upstream ships changes: run `/upgrade-boop` inside `claude` (t
 ```
 boop-agent/
 ├── server/
-│   ├── index.ts                   # Express + WS + HTTP routes
-│   ├── sendblue.ts                # iMessage webhook, reply, typing indicator
+│   ├── index.ts                   # Express + WS + HTTP routes + Telegram lifecycle
+│   ├── telegram.ts                # grammy-based bot: send/receive/voice/typing
+│   ├── whisper.ts                 # Thin HTTP client to the Whisper sidecar
 │   ├── interaction-agent.ts       # Dispatcher
 │   ├── execution-agent.ts         # Sub-agent runner
 │   ├── automations.ts             # Cron loop
 │   ├── automation-tools.ts        # create/list/toggle/delete MCP
 │   ├── draft-tools.ts             # save_draft / send_draft / reject_draft MCP
 │   ├── heartbeat.ts               # Stale-agent sweep
-│   ├── consolidation.ts           # 3-phase adversarial pipeline (proposer → adversary → judge)
-│   ├── usage.ts                   # aggregateUsageFromResult helper (shared cost aggregation)
-│   ├── embeddings.ts              # Voyage / OpenAI wrapper
-│   ├── composio.ts                # Composio SDK wrapper (session + toolkit scoping)
+│   ├── consolidation.ts           # 3-phase adversarial pipeline
+│   ├── usage.ts                   # Shared cost aggregation helper
+│   ├── embeddings.ts              # Voyage / OpenAI / local fallback
+│   ├── composio.ts                # Composio SDK wrapper
 │   ├── composio-routes.ts         # /composio/* HTTP routes for the Debug UI
 │   ├── broadcast.ts               # WS fanout
 │   ├── convex-client.ts           # Convex HTTP client
 │   ├── memory/
 │   │   ├── types.ts
-│   │   ├── tools.ts               # write_memory / recall (vector + substring)
-│   │   ├── extract.ts             # Post-turn extraction
-│   │   └── clean.ts               # Decay + archive + prune
+│   │   ├── tools.ts
+│   │   ├── extract.ts
+│   │   └── clean.ts
 │   └── integrations/
-│       ├── registry.ts            # Integration loader
-│       └── composio-loader.ts     # Registers each connected Composio toolkit
+│       ├── registry.ts
+│       └── composio-loader.ts
+├── whisper-service/               # FastAPI + faster-whisper sidecar
+│   ├── app.py
+│   ├── requirements.txt
+│   ├── Dockerfile
+│   └── README.md
 ├── convex/
 │   ├── schema.ts
 │   ├── messages.ts
@@ -485,16 +559,16 @@ boop-agent/
 │   ├── conversations.ts
 │   ├── drafts.ts
 │   ├── memoryEvents.ts
-│   ├── usageRecords.ts            # Append-only per-call cost log
-│   └── sendblueDedup.ts
-├── debug/                         # Dashboard: Dashboard / Agents / Automations / Memory / Events / Connections
+│   └── usageRecords.ts            # Append-only per-call cost log
+├── debug/                         # Dashboard
 ├── scripts/
 │   ├── setup.ts                   # Interactive setup CLI
-│   ├── dev.mjs                    # One-command orchestrator (server + convex + vite + ngrok)
-│   ├── preflight.mjs              # Checks convex/_generated exists before booting
-│   ├── sendblue-sync.mjs          # Pulls phone number from `sendblue lines`
-│   └── sendblue-webhook.mjs       # Registers inbound webhook via Sendblue CLI
-├── README.md           ← you are here
+│   ├── dev.mjs                    # One-command orchestrator
+│   ├── preflight.mjs              # Checks convex/_generated exists
+│   └── composio-webhook.ts        # Auto-register Composio webhook with PUBLIC_URL
+├── Dockerfile                     # Node 20 image for the boop process
+├── docker-compose.yml             # boop + whisper, Traefik labels
+├── README.md                      ← you are here
 ├── ARCHITECTURE.md
 └── INTEGRATIONS.md
 ```
@@ -516,32 +590,12 @@ claude                 # inside your repo
 
 1. Refuses to run with a dirty working tree.
 2. Creates a timestamped rollback tag.
-3. Previews upstream changes bucketed by area (core / integrations / UI / schema / scripts / docs).
-4. Merges (or cherry-picks, or rebases — your choice).
-5. Runs `npm install` + `npm run typecheck`.
-6. Parses `CHANGELOG.md` for `[BREAKING]` entries and offers to run the referenced migration skills.
-7. Prints a rollback hash + any env-var additions you should copy into `.env.local`.
+3. Fetches `upstream` and shows you a per-file summary of the merge.
+4. Surfaces `[BREAKING]` rows from CHANGELOG.md so you can react.
+5. Merges with conflict-aware resolution heuristics.
+6. Validates (typecheck + dry-run convex deploy) and reports.
 
-Plain git works too, if you'd rather:
-
-```bash
-git remote add upstream https://github.com/chris/boop-agent.git    # one-time
-git fetch upstream
-git merge upstream/main      # or: git rebase upstream/main
-```
-
-### New-version notifications
-
-Every time you run `npm run dev`, a small background check (`scripts/check-upstream.mjs`) asks your `upstream` remote if there are new commits. If there are, you'll see a banner up top with the count and a reminder to run `/upgrade-boop`. If you're up to date, or the check fails for any reason (offline, no `upstream` remote, timeout), it stays silent.
-
-Behavior at a glance:
-
-- `upstream` set, new commits → banner with the count
-- `upstream` set, up to date → silent
-- No `upstream` remote, on a fork → one-line hint on adding it
-- No `upstream` remote, on the canonical repo → silent (you *are* upstream)
-
-To turn it off:
+To turn off the upstream check banner:
 
 - **Env var:** add `BOOP_UPSTREAM_CHECK=false` to `.env.local`
 - **Or comment it out:** the call lives in `scripts/dev.mjs` — the `spawn("node", ["scripts/check-upstream.mjs"], ...)` block. Delete or comment that block and the check never runs.
@@ -556,8 +610,8 @@ Every release lists additions under [CHANGELOG.md](./CHANGELOG.md), with `[BREAK
 
 **Agent doesn't reply.**
 - Check the server is running: `curl http://localhost:3456/health`
-- Check the Sendblue webhook is pointed at `<public-url>/sendblue/webhook`
-- Watch server logs. Look for `[sendblue]` and `[interaction]` messages.
+- Check the bot logs into Telegram: look for `[telegram] polling started as @your_bot` in the server output.
+- Confirm your chat id is in `TELEGRAM_ALLOWED_CHAT_IDS` (or that it's blank for testing).
 
 **Convex errors / `VITE_CONVEX_URL is not set`.**
 - Run `npx convex dev` manually. Ensure `.env.local` has both `CONVEX_URL` and `VITE_CONVEX_URL`.
@@ -565,19 +619,23 @@ Every release lists additions under [CHANGELOG.md](./CHANGELOG.md), with `[BREAK
 **"Could not find public function for X:Y".**
 - `CONVEX_DEPLOYMENT` and `CONVEX_URL` in `.env.local` are pointing at different projects. `convex dev` pushes functions to `CONVEX_DEPLOYMENT` but the client reads from `CONVEX_URL`. Fix: make sure the URL has the same name as the deployment — `CONVEX_DEPLOYMENT=dev:foo-bar-123` → `CONVEX_URL=https://foo-bar-123.convex.cloud`. Re-running `npm run setup` now auto-syncs these.
 
+**Voice notes never get transcribed.**
+- `WHISPER_URL` is unset, or the sidecar isn't reachable. From the boop container: `curl $WHISPER_URL`. From outside Docker: check the sidecar is bound to `127.0.0.1:9000` and that boop runs on the same host.
+- Whisper takes a while on the first request — the model loads lazily. Subsequent requests are fast.
+
 **Agent replies but can't use my integration.**
 - Check `COMPOSIO_API_KEY` is set in `.env.local`.
 - Check the toolkit shows as **Connected** in the Connections tab.
 - Watch server logs for `[composio] registered …` at boot and `[integrations] unknown integration: …` on spawn attempts.
 
-**I want to skip Sendblue for now.**
-- The server exposes `POST /chat` with `{ conversationId, content }` — curl or a tiny client can drive the agent directly, no iMessage required.
+**I want to skip Telegram for now.**
+- The server exposes `POST /chat` with `{ conversationId, content }` — curl or a tiny client can drive the agent directly. The Debug UI's Chat tab uses this same endpoint.
 
 **Claude SDK says no credentials.**
 - Run `claude` once and sign in, or set `ANTHROPIC_API_KEY` in `.env.local`.
 
-**"Cannot send messages to self" / "missing required parameter: from_number".**
-- `SENDBLUE_FROM_NUMBER` is set to your personal cell instead of your Sendblue-provisioned number. Run `npm run sendblue:sync` to pull the correct number from `sendblue lines` and write it to `.env.local`.
+**`telegram` errors with `409 Conflict: terminated by other getUpdates request`.**
+- Two boop processes are polling at once. Stop the older one or switch one to `TELEGRAM_MODE=webhook`.
 
 **"Dashboard crashed" in the debug UI.**
 - The ErrorBoundary caught something. Check the server logs (`server │` stream) and the browser console — both will have the real error. Most common cause: a new Convex function hasn't been deployed yet. Restart `npm run dev` so `convex dev` re-pushes.

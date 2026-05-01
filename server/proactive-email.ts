@@ -9,7 +9,7 @@ import { api } from "../convex/_generated/api.js";
 import { convex } from "./convex-client.js";
 import { aggregateUsageFromResult, EMPTY_USAGE, type UsageTotals } from "./usage.js";
 import { handleUserMessage } from "./interaction-agent.js";
-import { sendImessage } from "./sendblue.js";
+import { sendTelegramMessage } from "./telegram.js";
 import { ensureTrigger, getComposio, listConnectedToolkits } from "./composio.js";
 import { ensureWebhookSubscription } from "./composio-webhook.js";
 import { describeUserNow } from "./timezone-config.js";
@@ -27,8 +27,8 @@ const warmupSeen = new Set<string>();
 // 200 immediately, so duplicate deliveries should be rare, but Composio's
 // retry policy on transient errors and the occasional double-fire (race
 // between subscription update + in-flight events) can still produce one.
-// Without dedup that turns into a duplicate iMessage, which is exactly the
-// kind of false alarm that erodes trust in the proactive feature.
+// Without dedup that turns into a duplicate Telegram message, which is exactly
+// the kind of false alarm that erodes trust in the proactive feature.
 const PROCESSED_MESSAGES_CAP = 1024;
 const processedMessageIds = new Set<string>();
 
@@ -81,7 +81,7 @@ function normalizeEmail(payload: Record<string, unknown>): NormalizedEmail {
   };
 }
 
-export const RUBRIC_PROMPT = `You are deciding whether an email warrants interrupting the user with a proactive iMessage.
+export const RUBRIC_PROMPT = `You are deciding whether an email warrants interrupting the user with a proactive Telegram message.
 
 Surface (return important=true) when the email is one of:
 - A security-sensitive code or login alert (OTPs, "new sign-in from", password reset, vulnerability disclosure for the user's own infra).
@@ -105,7 +105,7 @@ Drop (return important=false) when the email is:
   - The body has no concrete shared context — generic ask, no specific project / file / calendar event / prior thread the user actually engaged with.
   - "Re: Fwd: {company-name}" or single-word "Re:" subjects with a fresh sales pitch in the body — reps fake-thread to dodge filters.
   - First-name greeting + a question mark + an offer = template, not a real request.
-- **Submissions to the user's own products / SaaS — DROP**. Form submissions, feedback, feature requests, and bug reports landing in the user's product inboxes (UserJot, Canny, Webflow Forms, Formspark, Tally, Typeform, custom contact forms) are routine product feedback. The user reviews them on their own schedule; they don't need an iMessage interrupt for each one. Surface only if the body explicitly indicates an outage, security issue, or named urgent escalation.
+- **Submissions to the user's own products / SaaS — DROP**. Form submissions, feedback, feature requests, and bug reports landing in the user's product inboxes (UserJot, Canny, Webflow Forms, Formspark, Tally, Typeform, custom contact forms) are routine product feedback. The user reviews them on their own schedule; they don't need a Telegram interrupt for each one. Surface only if the body explicitly indicates an outage, security issue, or named urgent escalation.
 - **User-initiated auth flows — DROP**. Magic-link sign-in emails, "click here to verify your sign-in", "your one-time login link", and similar confirmations that the user obviously just triggered themselves by clicking "Sign in" on a service. The OTP / new-sign-in-from-unknown-device case is different — surface those.
 - **Expired deadlines — DROP**. Invitations, RSVPs, or time-bound asks where the deadline date has already passed at the moment the email is being classified. Acting on them is no longer possible; surfacing wastes the user's attention.
 - **Low-severity automated alerts — DROP** even when they mention "security" or "anomaly". Routine scanner noise — Vercel "1 error anomaly detected, low severity", F5Bot keyword mentions, generic "we noticed unusual activity" emails without a confirmed compromise or required action — should drop. Surface only when the alert names a specific compromise the user must respond to (account takeover, key leak, payee added, OAuth grant, vulnerability requiring patch).
@@ -116,7 +116,7 @@ How to tell "real personal/work request" from "cold outreach in a friendly costu
 - Automated signals (drop unless security/time-bound): from "no-reply"/"notifications"/"alerts"/"team@..." mass addresses, generic salutation, body is templated/HTML-heavy, sender domain matches a known marketing/notification service.
 - When in doubt → drop. False positives erode trust faster than missing one notice.
 
-When important=true, write a summary in 1-2 short sentences for an iMessage:
+When important=true, write a summary in 1-2 short sentences for a Telegram message:
 - Lead with what matters (who is asking what, the deadline, the action).
 - Address the user in second person ("you"). Never refer to the user in third person, even if their name appears in the email — the user IS the recipient and one of the User identities at the bottom.
 - Plain text, no markdown, no signoff.
@@ -273,43 +273,38 @@ async function recallPreferenceLines(): Promise<string[]> {
   }
 }
 
-// Bring whatever the user put in BOOP_USER_PHONE to E.164 (+1XXXXXXXXXX).
-// Without this, a bare 10-digit number in env produces an `sms:NNNNNNNNNN`
-// conversation that doesn't match the `sms:+1NNNNNNNNNN` ID Sendblue uses
-// for inbound messages from the same person — proactive notices end up in
-// a parallel Convex conversation invisible to the user-driven thread.
-function normalizeProactivePhone(raw: string): string | null {
+// Telegram chat ids are plain integers (or negative integers for groups).
+// We accept anything non-empty here — the Bot API will reject malformed ones.
+function normalizeProactiveChatId(raw: string): string | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
-  if (trimmed.startsWith("+")) return trimmed;
-  if (/^\d{10}$/.test(trimmed)) return `+1${trimmed}`;
-  if (/^\d{11,15}$/.test(trimmed)) return `+${trimmed}`;
-  return null;
+  if (!/^-?\d+$/.test(trimmed)) return null;
+  return trimmed;
 }
 
 async function dispatchProactiveNotice(summary: string): Promise<void> {
-  const raw = process.env.BOOP_USER_PHONE;
+  const raw = process.env.BOOP_USER_TG_CHAT_ID;
   if (!raw) {
-    console.warn("[proactive] BOOP_USER_PHONE not set; skipping dispatch");
+    console.warn("[proactive] BOOP_USER_TG_CHAT_ID not set; skipping dispatch");
     return;
   }
-  const phone = normalizeProactivePhone(raw);
-  if (!phone) {
+  const chatId = normalizeProactiveChatId(raw);
+  if (!chatId) {
     console.warn(
-      `[proactive] BOOP_USER_PHONE=${JSON.stringify(raw)} doesn't look like a valid phone number; skipping dispatch`,
+      `[proactive] BOOP_USER_TG_CHAT_ID=${JSON.stringify(raw)} is not a valid Telegram chat id; skipping dispatch`,
     );
     return;
   }
-  const conversationId = `sms:${phone}`;
+  const conversationId = `tg:${chatId}`;
   const reply = await handleUserMessage({
     conversationId,
     content: `[proactive notice] ${summary}`,
     kind: "proactive",
   });
-  // handleUserMessage only sends iMessage from inside send_ack; the final
-  // reply is the caller's responsibility.
+  // handleUserMessage only sends Telegram messages from inside send_ack; the
+  // final reply is the caller's responsibility.
   if (reply && reply !== "(no reply)") {
-    await sendImessage(phone, reply);
+    await sendTelegramMessage(chatId, reply);
     await convex.mutation(api.messages.send, {
       conversationId,
       role: "assistant",
@@ -318,7 +313,7 @@ async function dispatchProactiveNotice(summary: string): Promise<void> {
   } else {
     // IA stayed silent — fall back to the raw classifier summary so the
     // user still gets the notice; otherwise classification was a no-op.
-    await sendImessage(phone, summary);
+    await sendTelegramMessage(chatId, summary);
     await convex.mutation(api.messages.send, {
       conversationId,
       role: "assistant",
@@ -347,9 +342,9 @@ export async function ensureProactiveWatcher(publicUrl: string): Promise<void> {
     console.warn("[proactive] COMPOSIO_API_KEY not set; skipping watcher setup");
     return;
   }
-  if (!process.env.BOOP_USER_PHONE) {
+  if (!process.env.BOOP_USER_TG_CHAT_ID) {
     console.warn(
-      "[proactive] BOOP_USER_PHONE not set; webhook will register but notices won't dispatch",
+      "[proactive] BOOP_USER_TG_CHAT_ID not set; webhook will register but notices won't dispatch",
     );
   }
   try {

@@ -1,0 +1,112 @@
+# docker-compose.yml — boop-agent VPS deployment.
+#
+# Targets a host that already runs Traefik with the `traefik-public` external
+# network and Let's Encrypt automation (the typical OVH / Hetzner / Contabo
+# Ubuntu 24.04 layout). All Traefik names are prefixed `boop-` to avoid
+# collisions with other projects on the same Traefik.
+#
+# Two networks:
+#   * boop-net           — internal-only. boop-agent ↔ boop-whisper.
+#   * traefik-public     — external, optional. Only attached to boop-agent
+#                          when you actually need an inbound public URL
+#                          (Composio webhook, or TELEGRAM_MODE=webhook).
+#                          Polling-mode Telegram needs no public URL at all.
+#
+# Bring up:
+#   docker compose up -d --build
+# Tail logs:
+#   docker compose logs -f boop
+# Stop:
+#   docker compose down
+
+name: boop
+
+services:
+  boop:
+    container_name: boop-agent
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env.local
+    environment:
+      # The Whisper sidecar lives on boop-net at this DNS name.
+      WHISPER_URL: http://whisper:9000/transcribe
+      NODE_ENV: production
+      PORT: "3456"
+    networks:
+      - boop-net
+      # Comment the next line out if you don't need any public route at all.
+      - traefik-public
+    depends_on:
+      whisper:
+        condition: service_started
+    mem_limit: 1500m
+    cpus: 2.0
+    labels:
+      # ---- Traefik wiring ---------------------------------------------------
+      # Disabled by default. Set BOOP_PUBLIC_HOST in your shell or .env
+      # (docker-compose interpolates from the host env, NOT from .env.local)
+      # and uncomment the routers you actually need before bringing the stack
+      # up. Polling Telegram + no Composio = leave everything below disabled.
+      - traefik.enable=false
+      - traefik.docker.network=traefik-public
+
+      # Composio webhook receiver — only needed if you use Composio for
+      # proactive Gmail. Reachable at https://${BOOP_PUBLIC_HOST}/composio/webhook.
+      # - traefik.enable=true
+      # - traefik.http.routers.boop-router-composio.rule=Host(`${BOOP_PUBLIC_HOST}`) && PathPrefix(`/composio/webhook`)
+      # - traefik.http.routers.boop-router-composio.entrypoints=websecure
+      # - traefik.http.routers.boop-router-composio.tls=true
+      # - traefik.http.routers.boop-router-composio.tls.certresolver=letsencrypt
+      # - traefik.http.routers.boop-router-composio.service=boop-svc
+      # - traefik.http.routers.boop-router-composio.priority=20
+
+      # Telegram webhook receiver — only needed when TELEGRAM_MODE=webhook.
+      # Polling mode is the default and needs no public URL.
+      # - traefik.http.routers.boop-router-telegram.rule=Host(`${BOOP_PUBLIC_HOST}`) && PathPrefix(`/telegram/webhook`)
+      # - traefik.http.routers.boop-router-telegram.entrypoints=websecure
+      # - traefik.http.routers.boop-router-telegram.tls=true
+      # - traefik.http.routers.boop-router-telegram.tls.certresolver=letsencrypt
+      # - traefik.http.routers.boop-router-telegram.service=boop-svc
+      # - traefik.http.routers.boop-router-telegram.priority=20
+
+      # Backend service definition (shared by both routers above).
+      # - traefik.http.services.boop-svc.loadbalancer.server.port=3456
+
+  whisper:
+    container_name: boop-whisper
+    build:
+      context: ./whisper-service
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      # Pick a model that fits your VPS. medium peaks ~2.5GB RAM and runs
+      # ~2x realtime on 4 vCPU; large-v3 needs ~5GB and runs slower.
+      WHISPER_MODEL: ${WHISPER_MODEL:-medium}
+      WHISPER_COMPUTE: ${WHISPER_COMPUTE:-int8}
+      WHISPER_DEVICE: ${WHISPER_DEVICE:-cpu}
+      # Leave WHISPER_LANGUAGE blank to autodetect per request.
+      WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-}
+    networks:
+      # Whisper is intentionally NOT on traefik-public. Only boop reaches
+      # it via boop-net.
+      - boop-net
+    volumes:
+      - whisper-cache:/models
+    mem_limit: 3500m
+    cpus: 2.0
+
+networks:
+  boop-net:
+    driver: bridge
+    internal: false  # boop-net allows the boop container to reach the
+                     # outside world (Telegram, Convex, etc.). The whisper
+                     # container is still inaccessible from outside the
+                     # host because nothing maps its port.
+  traefik-public:
+    external: true
+
+volumes:
+  whisper-cache:
+    name: boop-whisper-cache

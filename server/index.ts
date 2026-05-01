@@ -4,7 +4,11 @@ import cors from "cors";
 import { createServer } from "node:http";
 import { WebSocketServer } from "ws";
 import { addClient } from "./broadcast.js";
-import { createSendblueRouter } from "./sendblue.js";
+import {
+  createTelegramWebhookRouter,
+  registerTelegramWebhook,
+  startTelegramPolling,
+} from "./telegram.js";
 import { handleUserMessage } from "./interaction-agent.js";
 import { loadIntegrations } from "./integrations/registry.js";
 import { startCleanupLoop } from "./memory/clean.js";
@@ -52,7 +56,10 @@ async function main() {
     res.json({ ok: true, service: "boop-agent" });
   });
 
-  app.use("/sendblue", createSendblueRouter());
+  const telegramMode = (process.env.TELEGRAM_MODE ?? "polling").toLowerCase();
+  if (telegramMode === "webhook") {
+    app.use("/telegram", createTelegramWebhookRouter());
+  }
   app.use("/composio", createComposioRouter());
   app.use("/memory", createMemoryRouter());
 
@@ -111,9 +118,38 @@ async function main() {
     console.log(`boop-agent server listening on :${port}`);
     console.log(`  health      GET  http://localhost:${port}/health`);
     console.log(`  chat        POST http://localhost:${port}/chat`);
-    console.log(`  sendblue    POST http://localhost:${port}/sendblue/webhook`);
+    if (telegramMode === "webhook") {
+      console.log(`  telegram    POST http://localhost:${port}/telegram/webhook`);
+    }
     console.log(`  websocket   WS   ws://localhost:${port}/ws`);
   });
+
+  // Boot the Telegram transport AFTER the HTTP server is listening so the
+  // webhook receiver (if enabled) is ready before Telegram starts hitting it.
+  if (telegramMode === "webhook") {
+    // Telegram refuses to set a webhook to a non-public, non-HTTPS URL.
+    // scripts/setup.ts defaults PUBLIC_URL to http://localhost:<PORT> when
+    // the user doesn't pick a tunnel — that's truthy, but useless to Telegram.
+    // Match the localhost guard the proactive-watcher uses above so the warn
+    // actually fires and the user gets a clear hint instead of a swallowed 4xx.
+    const isUsable =
+      stableUrl &&
+      !stableUrl.includes("localhost") &&
+      !stableUrl.includes("127.0.0.1");
+    if (!isUsable) {
+      console.warn(
+        "[telegram] TELEGRAM_MODE=webhook but PUBLIC_URL is not set or points at localhost — Telegram requires a public HTTPS URL for webhooks.",
+      );
+    } else {
+      registerTelegramWebhook(stableUrl).catch((err) =>
+        console.error("[telegram] webhook registration failed", err),
+      );
+    }
+  } else {
+    startTelegramPolling().catch((err) =>
+      console.error("[telegram] polling failed to start", err),
+    );
+  }
 }
 
 main().catch((err) => {

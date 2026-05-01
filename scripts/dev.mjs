@@ -1,6 +1,12 @@
 #!/usr/bin/env node
-// One command to run Boop locally: server + convex + debug dashboard + ngrok.
+// One command to run Boop locally: server + convex + debug dashboard (+ optional ngrok).
 // Prefixes each child's output so you can tell who's saying what.
+//
+// With Telegram in polling mode (default) you don't need a public URL at all.
+// Ngrok is only spun up when:
+//   * PUBLIC_URL is unset/localhost AND COMPOSIO_API_KEY is set (so we can
+//     auto-register a Composio webhook URL), or
+//   * TELEGRAM_MODE=webhook (so Telegram can deliver updates back).
 
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
@@ -39,9 +45,18 @@ const envVars = readEnv();
 const port = envVars.PORT || "3456";
 const ngrokDomain = envVars.NGROK_DOMAIN || "";
 const publicUrl = envVars.PUBLIC_URL || "";
+const telegramMode = (envVars.TELEGRAM_MODE || "polling").toLowerCase();
 const hasStaticUrl =
   publicUrl && !publicUrl.includes("localhost") && !publicUrl.includes("127.0.0.1");
-const useNgrok = !hasStaticUrl || Boolean(ngrokDomain);
+
+// We only spin up ngrok when something actually needs a public URL:
+//   * Telegram webhook mode → /telegram/webhook needs to be reachable.
+//   * Composio + no static URL → we want to register the Composio webhook on
+//     each restart so proactive email notifications work in dev too.
+const needsPublicUrl =
+  telegramMode === "webhook" ||
+  (Boolean(envVars.COMPOSIO_API_KEY) && !hasStaticUrl);
+const useNgrok = needsPublicUrl && (!hasStaticUrl || Boolean(ngrokDomain));
 
 // --- binary detection ---------------------------------------------------
 function hasBinary(name) {
@@ -135,36 +150,29 @@ async function waitForNgrokUrl(timeoutMs = 15000) {
   return null;
 }
 
-function showBanner(url, stable) {
+function showBanner({ url, stable, headline }) {
   const line = "═".repeat(68);
-  const webhook = `${url}/sendblue/webhook`;
   const dashboard = `http://localhost:5173`;
-  const from = envVars.SENDBLUE_FROM_NUMBER;
-  const fromLine = from
-    ? `  📱 Text this Sendblue number:  ${from}  (from a DIFFERENT phone)`
-    : `  ⚠ SENDBLUE_FROM_NUMBER is not set — outbound sends will fail.\n     Run: npm run sendblue:sync   (pulls it from the Sendblue CLI)`;
-
-  const headline = stable
-    ? `your STABLE public URL is live.`
-    : `ngrok tunnel is live  (webhook auto-registered with Sendblue).`;
-  const footer = stable
-    ? ``
-    : `\n${C.dim}  ℹ The inbound webhook above was registered with Sendblue automatically.
-    Set SENDBLUE_AUTO_WEBHOOK=false in .env.local to disable, or pick a
-    stable URL (ngrok paid / Cloudflare Tunnel) via \`npm run setup\`.${C.reset}\n`;
-  const guide = stable
-    ? `\n  → First time? Sendblue dashboard → API Settings → Webhook\n    Configuration → add ${webhook} as INBOUND MESSAGE.\n`
-    : ``;
-
-  console.log(`
-${C.banner}${line}
-  Boop is ready — ${headline}
-
-  🐶 Debug dashboard (click me):   ${dashboard}
-  🌐 Public URL:                   ${url}
-  📮 Sendblue webhook (inbound):   ${webhook}
-${fromLine}${guide}
-${line}${C.reset}${footer}`);
+  const lines = [
+    `${C.banner}${line}`,
+    `  Boop is ready — ${headline}`,
+    ``,
+    `  🐶 Debug dashboard (click me):   ${dashboard}`,
+  ];
+  if (url) lines.push(`  🌐 Public URL:                   ${url}`);
+  if (telegramMode === "webhook" && url) {
+    lines.push(`  ✈ Telegram webhook:              ${url}/telegram/webhook`);
+  }
+  if (envVars.COMPOSIO_API_KEY && url) {
+    lines.push(`  📮 Composio webhook:              ${url}/composio/webhook`);
+  }
+  lines.push(line + C.reset);
+  console.log("\n" + lines.join("\n") + "\n");
+  if (!stable && url) {
+    console.log(
+      `${C.dim}  ℹ The public URL above is from ngrok and rotates each restart.${C.reset}\n`,
+    );
+  }
 }
 
 // --- main ---------------------------------------------------------------
@@ -178,8 +186,9 @@ ${C.dim}  Install:   brew install ngrok         (macOS)
              or download from https://ngrok.com/download
   Auth:      ngrok config add-authtoken <token>
              (free token at https://dashboard.ngrok.com)
-  Without ngrok you can still use the debug dashboard at http://localhost:5173
-  — iMessage replies via Sendblue won't work until your server is reachable.${C.reset}
+  Without ngrok the debug dashboard at http://localhost:5173 still works,
+  Telegram polling still works, but Composio webhook + Telegram webhook
+  mode won't.${C.reset}
 `);
   }
 }
@@ -223,29 +232,6 @@ if (useNgrok && ngrokInstalled) {
   ngrokUrlReady = waitForNgrokUrl().catch(() => null);
 }
 
-// Wait for all the core services to be ready before printing the banner,
-// so the URL isn't dangled in front of the user while Convex is still booting.
-async function autoRegisterWebhook(publicUrl) {
-  if (envVars.SENDBLUE_AUTO_WEBHOOK === "false") return;
-  const webhookUrl = `${publicUrl}/sendblue/webhook`;
-  const prefix = `${C.ngrok}webhook${C.reset} │ `;
-  const child = spawn("node", ["scripts/sendblue-webhook.mjs", webhookUrl], {
-    cwd: root,
-    env: { ...process.env },
-  });
-  child.stdout.on("data", (d) => {
-    for (const line of d.toString().split("\n")) {
-      if (line.trim()) process.stdout.write(prefix + line + "\n");
-    }
-  });
-  child.stderr.on("data", (d) => {
-    for (const line of d.toString().split("\n")) {
-      if (line.trim()) process.stdout.write(prefix + line + "\n");
-    }
-  });
-  await new Promise((r) => child.on("exit", r));
-}
-
 async function autoRegisterComposioWebhook(publicUrl) {
   if (envVars.COMPOSIO_AUTO_WEBHOOK === "false") return;
   if (!envVars.COMPOSIO_API_KEY) return;
@@ -274,35 +260,29 @@ Promise.all([
   ngrokUrlReady,
 ])
   .then(async ([, , , ngrokUrl]) => {
-    if (useNgrok && ngrokInstalled) {
-      if (ngrokUrl) {
-        // Only auto-register for ephemeral ngrok URLs. Reserved domains and
-        // static URLs are already fixed in the Sendblue dashboard.
-        if (!ngrokDomain) {
-          await autoRegisterWebhook(ngrokUrl);
-        }
-        // Composio webhook subscription is fully programmatic (PATCHable),
-        // so we can refresh it on every restart regardless of whether the
-        // domain is reserved.
-        await autoRegisterComposioWebhook(ngrokUrl);
-        showBanner(ngrokUrl, Boolean(ngrokDomain));
-      } else {
-        console.log(
-          `${C.ngrok}ngrok${C.reset} │ could not read tunnel URL from http://127.0.0.1:4040 — check ngrok output above.`,
-        );
-      }
-    } else if (hasStaticUrl) {
-      showBanner(publicUrl, true);
+    const url = ngrokUrl || (hasStaticUrl ? publicUrl : "");
+    if (url && envVars.COMPOSIO_API_KEY) {
+      await autoRegisterComposioWebhook(url);
+    }
+    if (url) {
+      const stable = Boolean(ngrokDomain) || hasStaticUrl;
+      const headline = stable
+        ? `your STABLE public URL is live.`
+        : `ngrok tunnel is live.`;
+      showBanner({ url, stable, headline });
     } else {
       const line = "═".repeat(68);
       console.log(`
 ${C.banner}${line}
-  Boop is running locally.
+  Boop is running locally (Telegram polling).
 
   🐶 Debug dashboard:   http://localhost:5173
 
-  ⚠ No public tunnel configured. iMessage won't work until you expose
-    the server. Use the Chat tab in the dashboard to test for now.
+  ${
+    telegramMode === "webhook"
+      ? "⚠ TELEGRAM_MODE=webhook but no public URL — Telegram updates won't be delivered. Switch to polling or expose a public URL."
+      : "ℹ Telegram polling is active — message your bot to test."
+  }
 ${line}${C.reset}
 `);
     }
