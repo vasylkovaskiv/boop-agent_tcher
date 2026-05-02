@@ -236,11 +236,35 @@ Env:
 - `COMPOSIO_API_KEY` — required for integrations. Without it, plain chat + memory + automations still work.
 - `COMPOSIO_USER_ID` — optional; defaults to `boop-default` for single-tenant use.
 
+### 11. Integrations — Perplexity Pro Search (`server/perplexity*.ts`)
+
+Reverse-engineered Perplexity Pro Search integration sitting alongside the Composio path. Loaded in the same `loadIntegrations()` pass, gated on `PERPLEXITY_PROXY_URL` being set (without a residential proxy Cloudflare reliably 403s the search endpoint and burns the cookies; better to no-op).
+
+Flow on a search:
+1. Worker calls `mcp__perplexity__perplexity_search({ query, mode? })`.
+2. `perplexitySearch()` SHA-256s the (mode + model + language + query) tuple, looks it up in `perplexityCache` — Pro queries get a 5-minute TTL (dedup same-turn duplicates), concise gets a 1h–24h heuristic TTL.
+3. On a miss, the request is enqueued (sequential FIFO with 1–4s jitter — parallel requests on the same cookie pair are a fast path to a ban).
+4. The job pulls cookies + `userAgent` from the singleton `perplexityState` row, looks up `last_backend_uuid` from `perplexitySessions` (per-conversation, expires after 55 min), and POSTs to `/rest/sse/perplexity_ask` through the residential proxy (undici `ProxyAgent` for HTTP/HTTPS proxies, `Socks5ProxyAgent` for SOCKS5).
+5. SSE stream is parsed for the cumulative `markdown_block` + the `web_result_block` sources + the `pro_search_steps` plan. The result is cached, the new `backend_uuid` is persisted as the conversation's session, and the worker gets back a markdown answer with a `**Sources:**` section that the dispatcher passes through verbatim.
+
+Health:
+- `server/perplexity-keep-alive.ts` runs a setTimeout loop (6h ± 30 min jitter) that hits `/api/auth/session` through the proxy. On 401/403 it sends a Telegram alert (`TELEGRAM_ADMIN_CHAT_ID`, falling back to first allowed chat id) with a 1h cooldown and increments `consecutiveFailures` in `perplexityState`.
+- Cookie refresh is a human-driven step run from the user's local machine via `npm run refresh-perplexity-cookies -- --profile-id=<id>`. The script attaches `puppeteer-core` to a Dolphin Anty profile via the local CDP endpoint, extracts the cookie jar, verifies that `__Secure-next-auth.session-token` is present (without that exact cookie name Perplexity silently downgrades to free tier), then pushes everything to Convex via `api.perplexity.updateCookies`.
+
+Cloudflare fallback:
+- The happy path is plain undici fetch through the proxy. If TLS-fingerprinting becomes a problem, set `PERPLEXITY_USE_CYCLETLS=1` and `npm install cycletls`. The client lazy-imports cycletls only when the flag is on, so installs without it keep working.
+
+Env:
+- `PERPLEXITY_PROXY_URL` — required. Any residential proxy URL (HTTP/HTTPS or SOCKS5). Static residential preferred over rotating — cookie session is IP-bound. Disables the integration entirely when unset.
+- `PERPLEXITY_TIMEZONE` — IANA timezone string, sent on every search to match the proxy's country.
+- `TELEGRAM_ADMIN_CHAT_ID` — alert destination; falls back to first id in `TELEGRAM_ALLOWED_CHAT_IDS`.
+- `PERPLEXITY_USE_CYCLETLS` — opt-in TLS fingerprint impersonation.
+
 ---
 
 ## Data model (Convex)
 
-Seven tables. Read `convex/schema.ts` for the exact shape.
+Read `convex/schema.ts` for the exact shape.
 
 | Table | Role | Key fields |
 |---|---|---|
@@ -255,6 +279,9 @@ Seven tables. Read `convex/schema.ts` for the exact shape.
 | `consolidationRuns` | History of consolidation passes | runId, proposalsCount, mergedCount, prunedCount |
 | `memoryEvents` | Append-only event log for the debug UI | eventType, conversationId, memoryId, data |
 | `settings` | Runtime overrides (model, etc.) read by `server/runtime-config.ts` | key, value, updatedAt |
+| `perplexityState` | Singleton — Perplexity Pro cookies + health | cookies, userAgent, timezone, lastSuccessAt, consecutiveFailures |
+| `perplexityCache` | TTL'd query result cache | queryHash, query, mode, result, expiresAt, hits |
+| `perplexitySessions` | Per-conversation `last_backend_uuid` for follow-ups | conversationId, backendUuid, lastUsedAt |
 
 `memoryRecords` also carries a `vectorIndex("by_embedding")` with 1024-dimension vectors filtered by `lifecycle`.
 

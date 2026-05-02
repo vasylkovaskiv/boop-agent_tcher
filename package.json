@@ -16,7 +16,8 @@
     "build:debug": "vite build --config debug/vite.config.ts",
     "start": "npm run preflight && tsx server/index.ts",
     "deploy:convex": "convex deploy",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "refresh-perplexity-cookies": "node scripts/refresh-perplexity-cookies.mjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.1.0",
@@ -32,8 +33,11 @@
     "dotenv": "^16.4.0",
     "express": "^5.0.0",
     "grammy": "^1.30.0",
+    "https-proxy-agent": "^7.0.5",
     "openai": "^6.35.0",
     "react-force-graph-2d": "^1.27.0",
+    "undici": "^7.0.0",
+    "uuid": "^11.0.0",
     "ws": "^8.18.0",
     "zod": "^3.23.0"
   },
@@ -45,10 +49,12 @@
     "@types/prompts": "^2.4.9",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@types/uuid": "^10.0.0",
     "@types/ws": "^8.5.12",
     "@vitejs/plugin-react": "^4.3.0",
     "npm-run-all": "^4.1.5",
     "prompts": "^2.4.2",
+    "puppeteer-core": "^24.0.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tailwindcss": "^4.0.0",
