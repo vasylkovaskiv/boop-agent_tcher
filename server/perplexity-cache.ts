@@ -25,7 +25,13 @@ export function hashQuery(key: CacheKey): string {
   // Non-ASCII characters preserve their original case — Russian "Москва" and
   // "москва" are intentionally NOT collapsed because Perplexity may return
   // different results for them and we don't want to cross-pollute.
-  const normalized = key.query.trim().replace(/\s+/g, " ");
+  // The /[A-Za-z]/ mask is what enforces "ASCII-only" — a blanket
+  // .toLowerCase() would also fold cyrillic, which is exactly what the
+  // comment above warns against.
+  const normalized = key.query
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/[A-Za-z]/g, (c) => c.toLowerCase());
   return createHash("sha256")
     .update(`${key.mode}\0${key.modelPreference}\0${key.language}\0${normalized}`)
     .digest("hex");

@@ -71,10 +71,20 @@ function getDispatcher(): Dispatcher | null {
   // ProxyAgent supports http:// and https:// proxy URLs out of the box. For
   // socks5:// asocks endpoints, undici exposes Socks5ProxyAgent which is
   // wired up here as a thin parallel branch — kept narrow on purpose so the
-  // rest of the client stays scheme-agnostic.
+  // rest of the client stays scheme-agnostic. We accept socks://, socks5://
+  // and socks5h:// so users can paste whatever their proxy provider gave
+  // them; undici only constructs against socks5:// so socks5h:// is
+  // normalized down. The "h" in socks5h is the curl convention for
+  // "resolve DNS on the proxy side" — that's the only mode SOCKS5
+  // supports anyway, so collapsing the schemes is semantically a no-op.
   let agent: Dispatcher;
-  if (proxyUrl.startsWith("socks5://") || proxyUrl.startsWith("socks5h://")) {
-    agent = new Socks5ProxyAgent(proxyUrl);
+  if (
+    proxyUrl.startsWith("socks5://") ||
+    proxyUrl.startsWith("socks5h://") ||
+    proxyUrl.startsWith("socks://")
+  ) {
+    const normalizedUrl = proxyUrl.replace(/^socks5h:\/\//, "socks5://");
+    agent = new Socks5ProxyAgent(normalizedUrl);
   } else {
     agent = new ProxyAgent(proxyUrl);
   }
