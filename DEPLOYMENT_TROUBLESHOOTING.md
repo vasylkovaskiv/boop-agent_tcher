@@ -305,6 +305,17 @@ npm run refresh-perplexity-cookies -- --profile-id=<id-Dolphin-профиля>
 после рефреша снова 401 — Dolphin-профиль вышел из Perplexity, нужно
 вручную залогиниться там.
 
+**`{"success":false,"error":"automation is not available on Free plan"}` при
+запуске `refresh-perplexity-cookies`.** Dolphin Anty Free plan блокирует
+`?automation=1` на Local API — скрипт не может запустить профиль
+автоматически. Два выхода:
+1. Обновить Dolphin до Light tier (~$89/мес) — скрипт сразу заработает + можно
+   автоматизировать через cron.
+2. Ручной экспорт cookies через Cookie-Editor extension в запущенном
+   Dolphin-профиле + push через `npx convex run perplexity:updateCookies`.
+   Полный walkthrough в
+   [`docs/PERPLEXITY_SETUP.md` → Step 5b](docs/PERPLEXITY_SETUP.md#step-5b--manual-cookie-export-dolphin-free-plan-fallback).
+
 **Систематические 403 от Cloudflare сразу после рефреша cookies.** Не cookies
 виноваты — TLS-фингерпринт. Установи `cycletls` и включи флаг:
 ```bash
@@ -326,13 +337,26 @@ echo 'PERPLEXITY_USE_CYCLETLS=1' >> .env.local
 их игнорировать.
 
 **Worker не зовёт `mcp__perplexity__perplexity_search` несмотря на регистрацию.**
-Скорее всего dispatcher не положил `"perplexity"` в массив integrations при
-`spawn_agent`. Проверь:
+Две разные причины, проверяй по порядку:
+
+*A. Dispatcher не положил `"perplexity"` в массив `integrations` при `spawn_agent`.*
 1. В логах сервера должна быть строка `[perplexity] registered`.
-2. Skill `.claude/skills/web-research/SKILL.md` должен существовать (worker
-   читает skills через `settingSources: ["project"]` в `execution-agent.ts`).
-3. `availableIntegrations()` должен возвращать `"perplexity"` (можно
+2. `availableIntegrations()` должен возвращать `"perplexity"` (можно
    проверить через debug UI's Connections tab или `/health`).
+3. В spawn-строке (`[agent xxx] spawn: ... [perplexity]`) имя интеграции
+   видно — если не видно, dispatcher её не передаёт (может быть из-за
+   отсутствия `{{INTEGRATIONS}}` в его prompt'е; см. `server/interaction-agent.ts`).
+
+*B. Worker получил `[perplexity]` в spawn'е, но выбирает `WebSearch` /
+`WebFetch` вместо этого.* Обычно решается system prompt'ом — в
+`server/execution-agent.ts` функция `buildExecutionSystem()` должна
+встроить список интеграций и правило «prefer perplexity_search for synthesis»
+в базовый prompt. Если prompt этого не делает (старая версия репо до
+v2), worker по умолчанию будет предпочитать WebSearch (она "all-purpose").
+Грепни `EXECUTION_SYSTEM_BASE` в `server/execution-agent.ts` — должна быть
+фраза «prefer `mcp__perplexity__perplexity_search` for multi-source synthesis».
+Также убедись что `.claude/skills/web-research/SKILL.md` существует (worker
+читает skills через `settingSources: ["project"]`).
 
 **Cookies «протухают» каждые ~24 часа вместо ~7 дней.** Скорее всего у тебя
 включена двухфакторка на Perplexity-аккаунте, или Dolphin-профиль использует

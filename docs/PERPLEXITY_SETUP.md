@@ -292,6 +292,106 @@ you see:
 Dolphin profile, or (b) you logged out at some point. Open the profile
 manually, log into perplexity.ai again, run the script again.
 
+---
+
+## Step 5b — Manual cookie export (Dolphin Free plan fallback)
+
+`refresh-perplexity-cookies` calls Dolphin's Local API with `?automation=1`,
+which is gated behind the **paid Light tier** (~$89/mo). On the Free plan
+the call returns:
+
+```
+{"success":false,"error":"automation is not available on Free plan"}
+```
+
+When that happens you have two options:
+
+1. Upgrade Dolphin to Light. The script then "just works" and you can
+   automate via cron (Step 6, Option B).
+2. **Manually export the cookie jar via the Cookie-Editor extension.**
+   Free, but you have to repeat it every time the keep-alive loop
+   alerts you (every ~7 days under happy-path conditions).
+
+This section documents option 2.
+
+### 5b.1 Install Cookie-Editor in the Dolphin profile
+
+1. Start the Dolphin `perplexity-pro` profile so a Chrome window opens.
+2. In that Chrome window, install Cookie-Editor by Moustachauve:
+   `https://chromewebstore.google.com/detail/cookie-editor/hlkenndednhfkekhgcdicdfddnkalmdm`
+3. Pin the extension to the toolbar (puzzle icon → pushpin).
+
+This only needs to be done once per profile.
+
+### 5b.2 Export the cookie jar
+
+1. Navigate to `https://www.perplexity.ai/` in the Dolphin Chrome window.
+   Make sure you're logged in (the Pro badge is visible in the top-right).
+2. Click the Cookie-Editor toolbar icon.
+3. In the popup → bottom toolbar → **Export** → **Export as JSON**. The
+   JSON is now in your clipboard.
+4. Save it to a file locally, e.g. `~/cookies.json`. (Don't commit this
+   file anywhere — it is equivalent to your password.)
+
+### 5b.3 Capture the user agent
+
+Cookie-Editor doesn't export the user agent. Grab it separately from
+the same Dolphin Chrome window:
+
+1. Open a new tab in the Dolphin profile.
+2. Navigate to `chrome://version/`.
+3. Copy the value of the `User Agent:` line — it'll look something like
+   `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36`.
+
+The user agent must match the fingerprint Perplexity associates with
+the cookie session. Reusing a different UA later (e.g. node's default)
+is one of the easiest ways to invalidate the session within minutes.
+
+### 5b.4 Push to Convex
+
+The repo doesn't have a one-shot script for the manual path (the whole
+point of `refresh-perplexity-cookies` was to automate this), so you call
+the mutation directly via the Convex CLI. From any machine that has the
+bot's `CONVEX_URL` set:
+
+```bash
+# 1. Filter the export down to perplexity.ai cookies and stringify them as
+#    a single Cookie: header value (key=value; key=value; ...).
+node -e '
+  const cookies = require("/path/to/cookies.json")
+    .filter(c => /(^|\.)perplexity\.ai$/.test(c.domain.replace(/^\./, "")))
+    .map(c => `${c.name}=${c.value}`)
+    .join("; ");
+  console.log(cookies);
+' > /tmp/perplexity-cookie-string.txt
+
+# 2. Sanity check: the export MUST contain __Secure-next-auth.session-token.
+#    Without it the bot will run as free-tier silently.
+grep -q "__Secure-next-auth.session-token" /tmp/perplexity-cookie-string.txt \
+  && echo "ok" \
+  || echo "MISSING SESSION TOKEN — re-export"
+
+# 3. Push to Convex.
+npx convex run perplexity:updateCookies "$(jq -nc \
+  --arg cookies "$(cat /tmp/perplexity-cookie-string.txt)" \
+  --arg ua 'Mozilla/5.0 ... Chrome/147.0.0.0 ...' \
+  --arg tz 'Europe/Warsaw' \
+  '{cookies: $cookies, userAgent: $ua, timezone: $tz}')"
+```
+
+Replace the user agent string with what you copied in 5b.3 and the
+timezone with whatever the proxy's country uses (the same value you
+set in `PERPLEXITY_TIMEZONE` on the server).
+
+The next request through `mcp__perplexity__perplexity_search` will use
+the new cookies. The keep-alive loop will pick them up at its next tick
+(within 6h ± 30 min) and reset `consecutiveFailures` on first success.
+
+### 5b.5 Cleanup
+
+Delete `~/cookies.json` and `/tmp/perplexity-cookie-string.txt` once the
+push succeeds. They're as sensitive as your Perplexity password.
+
 ### 5.5 Smoke-test
 
 Send the bot a message in Telegram that should trigger a Perplexity
@@ -331,6 +431,10 @@ Once a week, on whatever day suits you:
    bot repo on your local machine.
 
 Set a recurring calendar event. Done.
+
+> If you're on the Dolphin Free plan and the script returns "automation
+> is not available", follow [Step 5b](#step-5b--manual-cookie-export-dolphin-free-plan-fallback)
+> on each refresh instead. Same cadence, manual export.
 
 ### Option B — automated via cron / launchd
 
@@ -404,8 +508,9 @@ for the full failure-mode matrix. Common ones:
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `[perplexity] disabled` in logs | `PERPLEXITY_PROXY_URL` not set | Add to `.env.local`, restart |
-| `no cookies in Convex` on first request | Cookies not seeded | Run `refresh-perplexity-cookies` |
-| `HTTP 401 — cookies expired` | Cookies rotated server-side | Run `refresh-perplexity-cookies` |
+| `no cookies in Convex` on first request | Cookies not seeded | Run `refresh-perplexity-cookies` (or follow Step 5b on Free plan) |
+| `HTTP 401 — cookies expired` | Cookies rotated server-side | Run `refresh-perplexity-cookies` (or follow Step 5b on Free plan) |
+| `{"success":false,"error":"automation is not available on Free plan"}` | Dolphin Free plan blocks `?automation=1` | Upgrade to Light, or use [Step 5b](#step-5b--manual-cookie-export-dolphin-free-plan-fallback) |
 | Systematic Cloudflare 403s right after refresh | TLS fingerprint flagged | `PERPLEXITY_USE_CYCLETLS=1` + `npm install cycletls` |
 | Cookies expire every ~24h instead of weekly | IP mismatch — Dolphin and bot use different proxies | Configure Dolphin profile to use `PERPLEXITY_PROXY_URL` |
 | Answer present but says "I cannot access real-time data" | Wrong `search_focus` | Bug in `server/perplexity-client.ts` — check `search_focus: "internet"` is in the request body |

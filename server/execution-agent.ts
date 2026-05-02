@@ -2,7 +2,11 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 import { api } from "../convex/_generated/api.js";
 import { convex } from "./convex-client.js";
 import { broadcast } from "./broadcast.js";
-import { buildMcpServersForIntegrations, listIntegrations } from "./integrations/registry.js";
+import {
+  buildMcpServersForIntegrations,
+  getIntegration,
+  listIntegrations,
+} from "./integrations/registry.js";
 import { createDraftStagingMcp } from "./draft-tools.js";
 import { aggregateUsageFromResult, EMPTY_USAGE, type UsageTotals } from "./usage.js";
 import { getRuntimeModel } from "./runtime-config.js";
@@ -42,15 +46,18 @@ function extractAccounts(input: unknown): string[] {
   return [...accounts];
 }
 
-const EXECUTION_SYSTEM = `You are a focused background worker for the user.
+const EXECUTION_SYSTEM_BASE = `You are a focused background worker for the user.
 
 Your job:
 1. Perform the task you were given, end to end.
-2. Use your tools — WebSearch, WebFetch, and any integrations loaded for this spawn — to investigate and act.
+2. Use your tools — WebSearch, WebFetch, the \`Skill\` tool (e.g. invoke the \`web-research\` skill for tool routing), and any integrations loaded for this spawn — to investigate and act.
 3. Return a concise, well-structured answer — not a data dump.
 
 Research discipline:
-- Prefer WebSearch for fresh/factual questions. WebFetch when you need the content of a known URL.
+- For multi-source synthesis ("compare A vs B", "top N of X", "что нового про Y"), current events, news, or anything the user explicitly tagged as Pro Search / perplexity / Про серч — use \`mcp__perplexity__perplexity_search\` when it is loaded for this spawn. It returns a synthesised answer plus cited sources in one round-trip.
+- Use WebSearch for simple, single-fact lookups (definitions, version numbers, dates).
+- Use WebFetch when you already have a specific URL.
+- When in doubt about routing, invoke the \`web-research\` Skill — it documents the decision tree.
 - Cite real URLs only — NEVER invent sources. If a page failed to load, say so.
 - Cross-check when it matters: one search is rarely enough for a claim.
 
@@ -77,6 +84,16 @@ Safety:
 - Only the interaction agent's send_draft tool commits. You never commit.
 
 Language: Write your final answer in Russian by default — the user is Russian-speaking. URLs, code, command names, and integration names (Gmail, Slack, etc.) stay in their original form. Switch language ONLY when the task or content is clearly in another language (e.g. drafting an English email to an English-speaking colleague — that email body stays in English, but your meta-commentary about it stays in Russian).`;
+
+function buildExecutionSystem(integrations: string[]): string {
+  const lines: string[] = [];
+  for (const name of integrations) {
+    const mod = getIntegration(name);
+    if (mod) lines.push(`- \`${name}\`: ${mod.description}`);
+  }
+  if (lines.length === 0) return EXECUTION_SYSTEM_BASE;
+  return `${EXECUTION_SYSTEM_BASE}\n\nIntegrations loaded for this spawn (use the matching mcp__<name>__* tools when they fit):\n${lines.join("\n")}`;
+}
 
 export interface SpawnOptions {
   task: string;
@@ -145,7 +162,7 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
     for await (const msg of query({
       prompt: opts.task,
       options: {
-        systemPrompt: EXECUTION_SYSTEM,
+        systemPrompt: buildExecutionSystem(Object.keys(integrationServers)),
         model: requestedModel,
         mcpServers,
         allowedTools,
