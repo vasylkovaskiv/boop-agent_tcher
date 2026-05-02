@@ -65,18 +65,19 @@ let dispatcherCache: Dispatcher | null = null;
 let dispatcherKey: string | null = null;
 
 function getDispatcher(): Dispatcher | null {
-  const proxyUrl = process.env.ASOCKS_PROXY_URL;
+  const proxyUrl = process.env.PERPLEXITY_PROXY_URL;
   if (!proxyUrl) return null;
   if (dispatcherCache && dispatcherKey === proxyUrl) return dispatcherCache;
-  // ProxyAgent supports http:// and https:// proxy URLs out of the box. For
-  // socks5:// asocks endpoints, undici exposes Socks5ProxyAgent which is
-  // wired up here as a thin parallel branch — kept narrow on purpose so the
-  // rest of the client stays scheme-agnostic. We accept socks://, socks5://
-  // and socks5h:// so users can paste whatever their proxy provider gave
-  // them; undici only constructs against socks5:// so socks5h:// is
-  // normalized down. The "h" in socks5h is the curl convention for
-  // "resolve DNS on the proxy side" — that's the only mode SOCKS5
-  // supports anyway, so collapsing the schemes is semantically a no-op.
+  // ProxyAgent handles http:// and https:// proxy URLs out of the box. For
+  // socks5:// residential endpoints (NodeMaven, Smartproxy, IPRoyal, asocks,
+  // …) undici exposes Socks5ProxyAgent which is wired up here as a thin
+  // parallel branch — kept narrow on purpose so the rest of the client stays
+  // scheme-agnostic. We accept socks://, socks5:// and socks5h:// so users
+  // can paste whatever their proxy provider gave them; undici only constructs
+  // against socks5:// so socks5h:// is normalized down. The "h" in socks5h
+  // is the curl convention for "resolve DNS on the proxy side" — that's the
+  // only mode SOCKS5 supports anyway, so collapsing the schemes is
+  // semantically a no-op.
   let agent: Dispatcher;
   if (
     proxyUrl.startsWith("socks5://") ||
@@ -189,7 +190,7 @@ async function doSearch(
 
   const dispatcher = getDispatcher();
   if (!dispatcher) {
-    throw new Error("[perplexity] ASOCKS_PROXY_URL not set — refusing to call Perplexity from a data-center IP");
+    throw new Error("[perplexity] PERPLEXITY_PROXY_URL not set — refusing to call Perplexity from a data-center IP");
   }
 
   const session = opts.conversationId
@@ -262,7 +263,7 @@ async function doSearch(
       method: "POST",
       headers,
       body: JSON.stringify(body),
-      proxyUrl: process.env.ASOCKS_PROXY_URL!,
+      proxyUrl: process.env.PERPLEXITY_PROXY_URL!,
       signal: opts.signal,
     });
   } else {
@@ -281,14 +282,22 @@ async function doSearch(
   }
 
   if (resp.status === 401 || resp.status === 403) {
+    // Drain the body so the proxy connection returns to the pool. Critical
+    // when cookies have expired — every queued search will hit this branch
+    // until refreshed, and an undrained body holds the underlying TCP
+    // socket open in undici's pool.
+    void resp.text().catch(() => undefined);
     const errorMsg = `HTTP ${resp.status} — cookies expired or Cloudflare challenge`;
     await convex.mutation(api.perplexity.recordFailure, { error: errorMsg });
     // Best-effort alert on the way out so the user notices before the next
     // search blocks. Don't block the search-error rejection on the alert.
-    void notifyCookiesExpired(errorMsg);
+    // Cooldown is enforced inside maybeNotifyCookiesExpired so a flood of
+    // queued failures coalesces into one Telegram ping per hour.
+    void maybeNotifyCookiesExpired(errorMsg);
     throw new Error(`[perplexity] ${errorMsg}`);
   }
   if (resp.status === 429) {
+    void resp.text().catch(() => undefined);
     const errorMsg = "HTTP 429 — Pro Search rate limit hit";
     await convex.mutation(api.perplexity.recordFailure, { error: errorMsg });
     throw new Error(`[perplexity] ${errorMsg}`);
@@ -585,11 +594,22 @@ export async function checkPerplexitySession(): Promise<{
 // Telegram alert helper. Dynamic-imported to avoid a circular dep with
 // telegram.ts (telegram.ts imports interaction-agent.ts which transitively
 // reaches integrations).
-async function notifyCookiesExpired(reason: string): Promise<void> {
+//
+// Cooldown is shared between the two callers — search-time 401/403 and the
+// keep-alive loop — so a single cookie outage doesn't trip alerts from both
+// sources within the same hour. The state lives at module scope here
+// because perplexity-keep-alive imports this helper (already depends on
+// adminChatIdOrFallback / checkPerplexitySession).
+let lastCookieAlertAt = 0;
+const COOKIE_ALERT_COOLDOWN_MS = 60 * 60 * 1000; // 1h
+
+export async function maybeNotifyCookiesExpired(reason: string): Promise<void> {
+  const now = Date.now();
+  if (now - lastCookieAlertAt < COOKIE_ALERT_COOLDOWN_MS) return;
   const adminChatId = adminChatIdOrFallback();
   if (!adminChatId) {
     console.warn(
-      "[perplexity] cookies expired alert skipped — TELEGRAM_ADMIN_CHAT_ID not set and TELEGRAM_ALLOWED_CHAT_IDS empty",
+      "[perplexity] cookies-expired alert skipped — TELEGRAM_ADMIN_CHAT_ID not set and TELEGRAM_ALLOWED_CHAT_IDS empty",
     );
     return;
   }
@@ -599,6 +619,7 @@ async function notifyCookiesExpired(reason: string): Promise<void> {
       adminChatId,
       `⚠️ Perplexity cookies expired (${reason}).\nRun \`npm run refresh-perplexity-cookies -- --profile-id=<id>\` to update.`,
     );
+    lastCookieAlertAt = now;
   } catch (err) {
     console.error("[perplexity] failed to send cookies-expired alert:", err);
   }

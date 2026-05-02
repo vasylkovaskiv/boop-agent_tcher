@@ -6,8 +6,8 @@ export function registerPerplexity(): void {
   // one, Cloudflare reliably 403s requests from datacenter IPs and we'd
   // immediately burn the user's cookies. Better to leave the integration
   // unregistered so the dispatcher never tries to spawn into it.
-  if (!process.env.ASOCKS_PROXY_URL) {
-    console.log("[perplexity] disabled — ASOCKS_PROXY_URL not set");
+  if (!process.env.PERPLEXITY_PROXY_URL) {
+    console.log("[perplexity] disabled — PERPLEXITY_PROXY_URL not set");
     return;
   }
   registerIntegration(buildPerplexityIntegrationModule());

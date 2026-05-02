@@ -8,7 +8,7 @@ export function buildPerplexityIntegrationModule(): IntegrationModule {
     name: "perplexity",
     description:
       "Perplexity Pro Search — synthesised web answers with cited sources via Claude Sonnet thinking.",
-    requiredEnv: ["ASOCKS_PROXY_URL"],
+    requiredEnv: ["PERPLEXITY_PROXY_URL"],
     createServer: async (ctx) => {
       const conversationId = ctx.conversationId;
       return createSdkMcpServer({

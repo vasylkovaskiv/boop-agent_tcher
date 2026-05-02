@@ -238,7 +238,7 @@ Env:
 
 ### 11. Integrations — Perplexity Pro Search (`server/perplexity*.ts`)
 
-Reverse-engineered Perplexity Pro Search integration sitting alongside the Composio path. Loaded in the same `loadIntegrations()` pass, gated on `ASOCKS_PROXY_URL` being set (without a residential proxy Cloudflare reliably 403s the search endpoint and burns the cookies; better to no-op).
+Reverse-engineered Perplexity Pro Search integration sitting alongside the Composio path. Loaded in the same `loadIntegrations()` pass, gated on `PERPLEXITY_PROXY_URL` being set (without a residential proxy Cloudflare reliably 403s the search endpoint and burns the cookies; better to no-op).
 
 Flow on a search:
 1. Worker calls `mcp__perplexity__perplexity_search({ query, mode? })`.
@@ -255,7 +255,7 @@ Cloudflare fallback:
 - The happy path is plain undici fetch through the proxy. If TLS-fingerprinting becomes a problem, set `PERPLEXITY_USE_CYCLETLS=1` and `npm install cycletls`. The client lazy-imports cycletls only when the flag is on, so installs without it keep working.
 
 Env:
-- `ASOCKS_PROXY_URL` — required. Disables the integration entirely when unset.
+- `PERPLEXITY_PROXY_URL` — required. Any residential proxy URL (HTTP/HTTPS or SOCKS5). Static residential preferred over rotating — cookie session is IP-bound. Disables the integration entirely when unset.
 - `PERPLEXITY_TIMEZONE` — IANA timezone string, sent on every search to match the proxy's country.
 - `TELEGRAM_ADMIN_CHAT_ID` — alert destination; falls back to first id in `TELEGRAM_ALLOWED_CHAT_IDS`.
 - `PERPLEXITY_USE_CYCLETLS` — opt-in TLS fingerprint impersonation.

@@ -652,19 +652,19 @@ Upgrade path when upstream ships changes: run `/upgrade-boop` inside `claude` (t
 
 ## Perplexity Pro Search
 
-Optional integration that gives the execution agent a `perplexity_search` tool backed by Perplexity Pro Search (Sonnet thinking + multi-source synthesis with citations). Disabled by default — when `ASOCKS_PROXY_URL` is unset the loader logs `[perplexity] disabled` and `availableIntegrations()` doesn't list it.
+Optional integration that gives the execution agent a `perplexity_search` tool backed by Perplexity Pro Search (Sonnet thinking + multi-source synthesis with citations). Disabled by default — when `PERPLEXITY_PROXY_URL` is unset the loader logs `[perplexity] disabled` and `availableIntegrations()` doesn't list it.
 
-**Full setup walkthrough:** [docs/PERPLEXITY_SETUP.md](./docs/PERPLEXITY_SETUP.md) — registration of asocks, Dolphin Anty profile config, cookie seeding, scheduling refreshes, hardening. Read that first if you're setting this up from scratch. The TL;DR below is for someone who already has the proxy + Pro account ready.
+**Full setup walkthrough:** [docs/PERPLEXITY_SETUP.md](./docs/PERPLEXITY_SETUP.md) — picking a proxy provider, Dolphin Anty profile config, cookie seeding, scheduling refreshes, hardening. Read that first if you're setting this up from scratch. The TL;DR below is for someone who already has the proxy + Pro account ready.
 
-Why a residential proxy is non-negotiable: Perplexity's Cloudflare layer reliably 403s requests from datacenter IPs, and a single 403 with the wrong fingerprint can burn the cookies. asocks.com (~$3/GB) is the cheap default. Any HTTP/HTTPS or SOCKS5 residential proxy works.
+Why a residential proxy is non-negotiable: Perplexity's Cloudflare layer reliably 403s requests from datacenter IPs, and a single 403 with the wrong fingerprint can burn the cookies. **Static** residential is preferred over rotating — a stable IP keeps the cookie session bound for the full 7-day window. NodeMaven Static Residential (~$5/IP/mo, unlimited traffic) is the recommended default; Smartproxy and IPRoyal also work. Any HTTP/HTTPS or SOCKS5 residential URL plugs in.
 
 ### TL;DR setup
 
 On the server where the bot runs, add to `.env.local`:
 
 ```env
-ASOCKS_PROXY_URL=http://USER:PASS@proxy.asocks.com:1080
-PERPLEXITY_TIMEZONE=Europe/Berlin
+PERPLEXITY_PROXY_URL=http://USER:PASS@gate.nodemaven.com:8080
+PERPLEXITY_TIMEZONE=Europe/Warsaw
 # Optional override; defaults to first id in TELEGRAM_ALLOWED_CHAT_IDS:
 # TELEGRAM_ADMIN_CHAT_ID=
 ```

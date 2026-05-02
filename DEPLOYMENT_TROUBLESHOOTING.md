@@ -279,13 +279,13 @@ IP будут блокироваться нестабильно.
 Reverse-engineered интеграция с `https://www.perplexity.ai/rest/sse/perplexity_ask`
 через резидентный прокси и cookies от живого Pro-аккаунта. Код в
 `server/perplexity*.ts`, схема — `convex/perplexityState`, `perplexityCache`,
-`perplexitySessions`. Всё включается, только если задан `ASOCKS_PROXY_URL`.
+`perplexitySessions`. Всё включается, только если задан `PERPLEXITY_PROXY_URL`.
 
 ### Симптомы и что делать
 
-**`[perplexity] disabled — ASOCKS_PROXY_URL not set`** в логах. Это нормально,
+**`[perplexity] disabled — PERPLEXITY_PROXY_URL not set`** в логах. Это нормально,
 если интеграция намеренно выключена. Чтобы включить — добавь в `.env.local`
-`ASOCKS_PROXY_URL=http://USER:PASS@host:port` и перезапусти бот.
+`PERPLEXITY_PROXY_URL=http://USER:PASS@host:port` и перезапусти бот.
 
 **`[perplexity] no cookies in Convex` при первом запросе.** Schema задеплоилась,
 но cookies ещё не залиты. Запусти на своей локальной машине (где установлен
@@ -336,10 +336,10 @@ echo 'PERPLEXITY_USE_CYCLETLS=1' >> .env.local
 
 **Cookies «протухают» каждые ~24 часа вместо ~7 дней.** Скорее всего у тебя
 включена двухфакторка на Perplexity-аккаунте, или Dolphin-профиль использует
-прокси, отличный от `ASOCKS_PROXY_URL`. Cookies валидируются по IP — если
+прокси, отличный от `PERPLEXITY_PROXY_URL`. Cookies валидируются по IP — если
 залил cookies через Dolphin'овский прокси (страна A), а бот стучится через
-asocks (страна B), Perplexity это видит и сбрасывает сессию.
-Решение: настрой Dolphin-профиль использовать тот же `ASOCKS_PROXY_URL`,
+резидентный прокси (страна B), Perplexity это видит и сбрасывает сессию.
+Решение: настрой Dolphin-профиль использовать тот же `PERPLEXITY_PROXY_URL`,
 перелогинься, рефрешни cookies.
 
 ### Что НЕЛЬЗЯ делать

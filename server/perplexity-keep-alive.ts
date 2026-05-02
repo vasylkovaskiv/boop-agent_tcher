@@ -1,6 +1,6 @@
 import { api } from "../convex/_generated/api.js";
 import { convex } from "./convex-client.js";
-import { adminChatIdOrFallback, checkPerplexitySession } from "./perplexity-client.js";
+import { checkPerplexitySession, maybeNotifyCookiesExpired } from "./perplexity-client.js";
 
 // Cookie session refresh window. Perplexity's `__Secure-next-auth.session-
 // token` lives ~7 days — checking every 6h with ±30 min jitter keeps us
@@ -13,11 +13,9 @@ const JITTER_MS = 30 * 60 * 1000;
 const INITIAL_DELAY_MS = 5 * 60 * 1000;
 
 let timer: NodeJS.Timeout | null = null;
-let lastAlertSentAt = 0;
-const ALERT_COOLDOWN_MS = 60 * 60 * 1000; // 1h — don't spam Telegram
 
 export function startPerplexityKeepAlive(): void {
-  if (!process.env.ASOCKS_PROXY_URL) return;
+  if (!process.env.PERPLEXITY_PROXY_URL) return;
   if (timer) return;
   scheduleNext(INITIAL_DELAY_MS);
   console.log("[perplexity] keep-alive scheduled");
@@ -59,7 +57,9 @@ async function runCheck(): Promise<void> {
       await convex.mutation(api.perplexity.recordFailure, {
         error: `keep-alive HTTP ${result.status}`,
       });
-      await maybeAlertCookiesExpired(`HTTP ${result.status}`);
+      // Cooldown shared with search-time 401/403 alerts inside
+      // perplexity-client.ts so a single outage doesn't double-page.
+      await maybeNotifyCookiesExpired(`HTTP ${result.status}`);
     } else {
       console.warn(`[perplexity] keep-alive: HTTP ${result.status}`);
     }
@@ -67,27 +67,5 @@ async function runCheck(): Promise<void> {
     console.error("[perplexity] keep-alive error:", err);
   } finally {
     scheduleNext();
-  }
-}
-
-async function maybeAlertCookiesExpired(reason: string): Promise<void> {
-  const now = Date.now();
-  if (now - lastAlertSentAt < ALERT_COOLDOWN_MS) return;
-  const adminChatId = adminChatIdOrFallback();
-  if (!adminChatId) {
-    console.warn(
-      "[perplexity] cookies-expired alert skipped — TELEGRAM_ADMIN_CHAT_ID not set and TELEGRAM_ALLOWED_CHAT_IDS empty",
-    );
-    return;
-  }
-  try {
-    const { sendTelegramMessage } = await import("./telegram.js");
-    await sendTelegramMessage(
-      adminChatId,
-      `⚠️ Perplexity cookies expired (${reason}).\nRun \`npm run refresh-perplexity-cookies -- --profile-id=<id>\` to update.`,
-    );
-    lastAlertSentAt = now;
-  } catch (err) {
-    console.error("[perplexity] failed to send keep-alive alert:", err);
   }
 }
