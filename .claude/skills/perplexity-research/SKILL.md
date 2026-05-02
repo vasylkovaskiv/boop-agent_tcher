@@ -46,22 +46,37 @@ After the tool returns, internally answer these three questions before doing any
 
 If coverage is complete AND no critical claims need verification AND sources are credible → **skip to Phase 4**. This is the common case for news / overview / comparison questions where Perplexity nailed it on the first try.
 
-### Phase 3 — Targeted refinement (max 3 extra tool calls total)
+### Phase 3 — Targeted refinement
 
-If Phase 2 surfaced gaps, fill them with the **cheapest tool** that fits each gap:
+If Phase 2 surfaced gaps, fill them with the **cheapest tool** that fits each gap. Pick deliberately: the wrong tool wastes time and tokens.
 
-| Gap type | Tool | Why |
-|---|---|---|
-| Specific URL detail (price page, contact page, full article) | `WebFetch(url)` | Free, fast, doesn't touch Perplexity's session at all. Parallelize when you have multiple URLs. |
-| Existence / sanity check ("is X still operating?", "did Y release in 2025?") | `WebSearch(query)` | Cheap, no Pro quota cost. |
-| Need synthesis on a sub-topic the first answer didn't cover | `mcp__perplexity__perplexity_search` follow-up | Same conversation = same Perplexity thread, so phrase as a follow-up ("what about X for the clubs you just listed?"). |
+- **Specific URL detail (price page, contact page, full article, hours)** → `WebFetch(url)`. Free, fast, doesn't touch Perplexity's cookie session at all.
+- **Existence / sanity check ("is X still operating?", "did Y release in 2025?")** → `WebSearch(query)`. Cheap, no Pro quota cost.
+- **Need synthesis on a sub-topic the first answer didn't cover** → `mcp__perplexity__perplexity_search` follow-up. Same conversation = same Perplexity thread, so phrase as a continuation.
 
-**Hard limits:**
-- **Max 3 perplexity_search calls per spawn**, including the initial Phase 1 call. Two follow-ups maximum.
-- **Max 3 follow-up tool calls in Phase 3 total** (across WebFetch / WebSearch / perplexity_search combined).
-- If you're considering a 4th Perplexity call, stop. The marginal value isn't worth the cookie wear.
+#### Hard cap (cookie protection)
 
-When you DO follow up via perplexity_search, phrase it like a human extending the conversation:
+- **Max 3 `perplexity_search` calls per spawn**, including the initial Phase 1 call. Two follow-ups maximum. If you're considering a 4th Perplexity call, stop — the marginal value isn't worth the cookie wear.
+
+#### WebFetch — use as many as you need, but BATCH them
+
+There is **no hard cap on `WebFetch`**. It runs on Anthropic infrastructure, doesn't touch Perplexity's session, and doesn't cost Pro quota. For per-item verification queries ("find me 6 places with verified hours", "verify pricing across 5 products") you may legitimately need one fetch per item.
+
+BUT: **always batch WebFetch calls in parallel.** When you have ≥2 URLs to verify, list them all as multiple `tool_use` blocks **in a single assistant message**. The SDK executes them concurrently — you wait once for the slowest, instead of N× sequentially.
+
+Do not call WebFetch one at a time across multiple reasoning steps if you already know the URLs you need. That serializes a workload that should run in parallel and bloats your context with intermediate states.
+
+#### Fact-extraction discipline (avoid token bloat)
+
+The single biggest cost in this workflow is your **input token bill** — every reasoning step re-reads everything you've accumulated. A typical web page is 5–20kB; 7 of them is 50–150kB of context that the model re-processes on every subsequent step.
+
+After each WebFetch returns, **immediately extract only the specific fact you wanted** (hours, address, phone, price, version, date). Write it down in a short note to yourself, then **do not refer to the raw page body again**. The full HTML/markdown of the page is dead weight after extraction.
+
+If the worker logs show `in/out tokens 200000+/...` for a 6-item verification, it means raw fetch bodies stayed in context. Aim for the worker token spend to scale with the number of facts extracted, not the size of the pages fetched.
+
+#### Phrasing perplexity_search follow-ups
+
+When you DO follow up via perplexity_search, phrase it like a human extending the conversation — Perplexity sees the prior answer in the same thread:
 - Bad: "Sport Life Borschagovka address yoga pool 2025" (keyword soup, ignores thread context)
 - Good: "Of the Sport Life clubs you mentioned, which actually have yoga in their schedule? And what's the current monthly membership price?"
 
@@ -73,35 +88,46 @@ Combine the initial answer + verified facts + any follow-up content into one coh
 - **Don't fabricate to fill gaps.** If after Phase 3 a piece of info is still uncertain, say so explicitly ("price not published — call the club directly to confirm"). The user trusts cited honesty more than confident-sounding guesses.
 - **Match the user's language.** Reply in Russian if the user wrote in Russian, English if they wrote in English. Don't mix unless the user did.
 
-## Worked example
+## Worked example — per-item verification
 
-**User task:** "Найди топ-5 фитнес-клубов в Киеве с йогой и бассейном — нужны адреса, цены, контакты."
+This is the typical pattern when the user asks for a list of N entities and wants per-entity facts verified (hours, address, price, contact, etc.). It's the most common shape of research task and the one where naive tool-shopping wastes the most tokens.
+
+**User task:** "Найди 6 хороших кальянных в Голосеевском районе, которые работают с 18:00 каждый день."
 
 **Phase 1 — packed Pro Search:**
 ```
 mcp__perplexity__perplexity_search({
-  query: "Top fitness clubs in Kyiv right bank with yoga classes and a swimming pool — addresses, monthly membership prices, contact info, valid for 2025",
+  query: "6 well-rated hookah lounges in Holosiivskyi district of Kyiv that are open from 18:00 every day — names, addresses, operating hours, and links to their official pages or social media",
   mode: "pro",
   language: "ru-RU"
 })
 ```
-→ returns 7 candidate clubs with overview + 8 source URLs.
+→ returns 6–8 candidate lounges with names, partial addresses, source URLs (mix of official pages, Google Maps, and aggregators).
 
 **Phase 2 — self-assess:**
-- Coverage: addresses are there for some, missing for 2. Yoga/pool flags are there. **Prices are vague** ("starting from 3500 UAH/month") and unverified.
-- Verification: prices and current operating status are the actionable facts. Worth a quick check.
-- Sources: sportlife.ua, 5element.ua, skyfitness.ua → all credible. Other 5 are SEO aggregators — don't follow them.
+- Coverage: 6+ candidates listed. Names, neighborhoods OK.
+- Verification: **operating hours are critical** — user explicitly asked for places open at 6pm. Perplexity's claim about hours is often stale. Each candidate must be verified individually against its own page.
+- Sources: official lounge pages and Google Maps URLs are reliable; aggregator URLs are not. Pick the official URL per lounge.
 
-**Phase 3 — 2 targeted refinements (parallel):**
-- `WebFetch("https://sportlife.ua/ru/clubs/kiev/")` — pull the canonical Sport Life list with current addresses.
-- `WebFetch("https://5element.ua/contacts/")` — verify 5 Element address + yoga/pool availability.
+**Phase 3 — batched WebFetch (single assistant message, parallel execution):**
+```
+WebFetch("https://art-bar-86.com/")
+WebFetch("https://lounge-name-2.com/contacts")
+WebFetch("https://maps.google.com/?cid=lounge3")
+WebFetch("https://lounge4.kyiv.ua/")
+WebFetch("https://lounge5.com/about")
+WebFetch("https://lounge6.kyiv.ua/hours")
+```
+All six tool calls go in **one assistant message**. SDK runs them concurrently. You wait once.
 
-(Skip the 3rd refinement — Skyfitness was an aggregator, not authoritative.)
+For each fetch, extract ONLY the operating hours into a short note (e.g. *"Art Bar 86: Mon–Sun 16:00–02:00 ✅"*). Discard the rest of the page — it's dead weight in your context.
+
+(If the first Pro Search didn't surface enough candidates, you may add ONE follow-up `perplexity_search` in the same thread phrased as "Какие ещё кальянные в Голосеевском районе вы рекомендуете?" — then re-batch WebFetch for the new candidates.)
 
 **Phase 4 — synthesize:**
-Top-5 ranked list, addresses verified for 4 of 5 clubs, prices marked "from ~3500 UAH/month, confirm with club" where unverified. Sources section includes the 3 authoritative URLs (sportlife.ua, 5element.ua, swimming-cool.com.ua) but NOT the SEO chum.
+6 lounges with verified hours, marked clearly which are open at 18:00 every day vs. which open later or close on certain days. Sources section lists the 6 authoritative URLs you actually fetched.
 
-**Telemetry:** 1 Pro Search + 2 WebFetch (parallel) + 0 follow-up Perplexity = total 1 Perplexity call against the cookie session, ~1.5 minutes wall-clock, far less Pro quota burned than calling Perplexity 5 times.
+**Telemetry target:** 1 Pro Search + N parallel WebFetch (1 wait) + optional 1 follow-up Pro Search = ~2–3 minutes wall-clock. Worker token spend should be ≤ (Phase 1 answer + N short hour-extractions), NOT (Phase 1 answer + N raw HTML pages). Aim for in/out around 70k–120k input rather than 200k+ when verifying 6 items.
 
 ## When NOT to use this skill
 

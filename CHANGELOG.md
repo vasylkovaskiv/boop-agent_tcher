@@ -25,6 +25,7 @@ Format:
   - Perplexity calls per turn: 5 → 1 (-80%).
   - Worker token spend: 289k in / 3.4k out → 64.8k in / 1.6k out.
 - Required env: `PERPLEXITY_PROXY_URL` (residential proxy URL) — refusing to call Perplexity from a data-center IP. See `.env.example`.
+- Tightened: `.claude/skills/perplexity-research/SKILL.md` (mirrored to `.agents/skills/`) Phase 3 guidance after a per-item-verification query (6 hookah lounges with operating hours) ran 7 sequential WebFetch calls and bloated worker input to 211k tokens. The prior "max 3 follow-up tool calls in Phase 3 total" cap was unrealistic for "verify N items" queries. Skill now: (a) keeps the hard 3-call cap on `perplexity_search` for cookie protection, (b) drops the WebFetch cap entirely with explicit guidance to **batch ≥2 WebFetch calls in a single assistant message** for parallel SDK execution, (c) requires fact-extraction immediately after each WebFetch (capture only the needed fact, do not retain raw page bodies in reasoning context). The worked example was rewritten from a fitness-club comparison to a hookah-lounge per-item verification, since that's the more common and more failure-prone shape of research task.
 
 ---
 
