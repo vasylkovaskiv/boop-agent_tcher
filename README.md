@@ -650,6 +650,62 @@ Upgrade path when upstream ships changes: run `/upgrade-boop` inside `claude` (t
 
 ---
 
+## Perplexity Pro Search
+
+Optional integration that gives the execution agent a `perplexity_search` tool backed by Perplexity Pro Search (Sonnet thinking + multi-source synthesis with citations). Disabled by default — when `ASOCKS_PROXY_URL` is unset the loader logs `[perplexity] disabled` and `availableIntegrations()` doesn't list it.
+
+Why a residential proxy is non-negotiable: Perplexity's Cloudflare layer reliably 403s requests from datacenter IPs, and a single 403 with the wrong fingerprint can burn the cookies. asocks.com (~$3/GB) is the cheap default. Any HTTP/HTTPS or SOCKS5 residential proxy works.
+
+### Setup (server side)
+
+Add to `.env.local` on the server where the bot runs:
+
+```env
+ASOCKS_PROXY_URL=http://USER:PASS@proxy.asocks.com:1080
+PERPLEXITY_TIMEZONE=Europe/Berlin
+TELEGRAM_ADMIN_CHAT_ID=123456789  # falls back to first allowed id if unset
+```
+
+Restart the bot. You'll see `[perplexity] registered` in the logs and `mcp__perplexity__perplexity_search` becomes available to spawn-able workers.
+
+### Setup (cookie refresh, local machine only)
+
+Cookies are extracted from a logged-in browser profile. The script runs on **your laptop**, not the bot's server, because Dolphin Anty (which holds the profile) is a desktop app.
+
+1. Install Dolphin Anty and create a profile. Log into perplexity.ai → Pro tier inside that profile manually.
+2. Enable Dolphin's Local API (Settings → Local API → port 3001). Note the profile ID.
+3. On your laptop, with this repo cloned:
+
+   ```bash
+   export CONVEX_URL=<the bot's deployment URL — same as server's>
+   export DOLPHIN_PROFILE_ID=<id-from-step-2>
+   npm run refresh-perplexity-cookies -- --profile-id=$DOLPHIN_PROFILE_ID
+   ```
+
+   The script verifies that `__Secure-next-auth.session-token` is present (without it Perplexity silently downgrades to free tier with no error), then pushes the cookie jar + `navigator.userAgent` into the bot's Convex `perplexityState` table.
+
+4. Repeat every 1–4 weeks, or when the keep-alive loop alerts you on Telegram.
+
+### What runs where
+
+- `server/perplexity-client.ts` — sequential queue with 1–4s jitter (parallel requests on the same cookie pair are a fast path to a ban). 5-minute cache for Pro queries (dedup same-turn duplicates), heuristic 1h–24h cache for concise.
+- `server/perplexity-keep-alive.ts` — every 6h ± 30 min hits `/api/auth/session` through the proxy. On 401/403 sends a Telegram alert (rate-limited to 1h cooldown) and increments the failure counter in `perplexityState`.
+- `convex/perplexity.ts` — `perplexityState` (singleton), `perplexityCache` (TTL'd), `perplexitySessions` (per-conversation `last_backend_uuid` for follow-ups, expires after 55 min).
+
+### Routing skill
+
+`.claude/skills/web-research/SKILL.md` (mirrored to `.agents/skills/`) tells the worker when to use `perplexity_search` vs `WebSearch` vs `WebFetch`. The decision tree biases toward Perplexity for current events / multi-source synthesis and toward `WebSearch` for simple fact lookups. The skill explicitly tells the worker to fall back to `WebSearch` if Perplexity returns an error.
+
+### When things break
+
+If you start seeing Cloudflare 403s in the logs, set `PERPLEXITY_USE_CYCLETLS=1` and `npm install cycletls`. The client lazy-loads cycletls only when this flag is on, so installs without it keep working.
+
+If `recordFailure` keeps incrementing and Telegram alerts arrive: rerun `refresh-perplexity-cookies`. If that doesn't help, the Dolphin profile itself is logged out — open it manually and log back in.
+
+See [DEPLOYMENT_TROUBLESHOOTING.md](./DEPLOYMENT_TROUBLESHOOTING.md) for the full failure-mode matrix.
+
+---
+
 ## Project layout
 
 ```

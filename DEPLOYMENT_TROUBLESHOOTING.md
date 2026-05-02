@@ -271,3 +271,88 @@ YouTube в 2025 году агрессивно блокирует дата-цен
 вернуть фичу — забирай файлы из `viktoriana565/boop-agent-new` и держи в виду
 что без личных cookies авторизованного аккаунта Google запросы с дата-центровых
 IP будут блокироваться нестабильно.
+
+---
+
+## 12. Perplexity Pro Search
+
+Reverse-engineered интеграция с `https://www.perplexity.ai/rest/sse/perplexity_ask`
+через резидентный прокси и cookies от живого Pro-аккаунта. Код в
+`server/perplexity*.ts`, схема — `convex/perplexityState`, `perplexityCache`,
+`perplexitySessions`. Всё включается, только если задан `ASOCKS_PROXY_URL`.
+
+### Симптомы и что делать
+
+**`[perplexity] disabled — ASOCKS_PROXY_URL not set`** в логах. Это нормально,
+если интеграция намеренно выключена. Чтобы включить — добавь в `.env.local`
+`ASOCKS_PROXY_URL=http://USER:PASS@host:port` и перезапусти бот.
+
+**`[perplexity] no cookies in Convex` при первом запросе.** Schema задеплоилась,
+но cookies ещё не залиты. Запусти на своей локальной машине (где установлен
+Dolphin Anty):
+```bash
+export CONVEX_URL=<тот же что у бота>
+npm run refresh-perplexity-cookies -- --profile-id=<id-Dolphin-профиля>
+```
+Скрипт упадёт с понятной ошибкой если в профиле нет `__Secure-next-auth.session-token`
+— значит профиль не залогинен в Perplexity. Открой Dolphin вручную, залогинься,
+повтори.
+
+**`HTTP 401 — cookies expired` или `HTTP 403`.** Cookies протухли (обычно через
+5–8 дней). Бот пришлёт алерт в Telegram (`TELEGRAM_ADMIN_CHAT_ID` или первый
+из `TELEGRAM_ALLOWED_CHAT_IDS`) и инкрементит `consecutiveFailures` в
+`perplexityState`. Лечится тем же `npm run refresh-perplexity-cookies`. Если
+после рефреша снова 401 — Dolphin-профиль вышел из Perplexity, нужно
+вручную залогиниться там.
+
+**Систематические 403 от Cloudflare сразу после рефреша cookies.** Не cookies
+виноваты — TLS-фингерпринт. Установи `cycletls` и включи флаг:
+```bash
+npm install cycletls
+echo 'PERPLEXITY_USE_CYCLETLS=1' >> .env.local
+```
+Клиент лениво подгружает `cycletls` только когда флаг включён, поэтому
+без флага сборка остаётся чистой.
+
+**`HTTP 429 — Pro Search rate limit hit`.** Перси-аккаунт упёрся в дневной
+лимит Pro Search (≥300/день). Подожди до следующих суток UTC, переходи на
+`mode: "concise"` для простых запросов, или докупай Pro+ план.
+
+**Ответ есть, но без источников / с фразой "I cannot access real-time data".**
+Это значит запрос ушёл с `search_focus != "internet"` или с неправильным
+`mode`. Проверь `server/perplexity-client.ts` — поле `search_focus: "internet"`
+обязательно для Pro Search. Без него Perplexity маршрутизирует запрос в
+"writing" режим, где модель видит результаты поиска но получает инструкцию
+их игнорировать.
+
+**Worker не зовёт `mcp__perplexity__perplexity_search` несмотря на регистрацию.**
+Скорее всего dispatcher не положил `"perplexity"` в массив integrations при
+`spawn_agent`. Проверь:
+1. В логах сервера должна быть строка `[perplexity] registered`.
+2. Skill `.claude/skills/web-research/SKILL.md` должен существовать (worker
+   читает skills через `settingSources: ["project"]` в `execution-agent.ts`).
+3. `availableIntegrations()` должен возвращать `"perplexity"` (можно
+   проверить через debug UI's Connections tab или `/health`).
+
+**Cookies «протухают» каждые ~24 часа вместо ~7 дней.** Скорее всего у тебя
+включена двухфакторка на Perplexity-аккаунте, или Dolphin-профиль использует
+прокси, отличный от `ASOCKS_PROXY_URL`. Cookies валидируются по IP — если
+залил cookies через Dolphin'овский прокси (страна A), а бот стучится через
+asocks (страна B), Perplexity это видит и сбрасывает сессию.
+Решение: настрой Dolphin-профиль использовать тот же `ASOCKS_PROXY_URL`,
+перелогинься, рефрешни cookies.
+
+### Что НЕЛЬЗЯ делать
+
+- **Не запускай `refresh-perplexity-cookies` на VPS.** Dolphin Anty — это
+  desktop-приложение для Windows/macOS. Скрипт всегда запускается локально
+  у тебя.
+- **Не делай параллельные запросы вручную (минуя очередь).** Перси быстро
+  банит аккаунты, у которых одни и те же cookies стучатся параллельно с
+  разных потоков — это паттерн account sharing.
+- **Не коммить `.env.local` или содержимое таблицы `perplexityState`.**
+  Cookies приравнены к паролю.
+- **Не меняй имя cookie `__Secure-next-auth.session-token` на похожее.**
+  Точный регистр и подчёркивание после `__Secure-` критичны. Без правильного
+  имени Perplexity молча отдаёт ответ free-tier — никаких ошибок, просто
+  деградация качества.

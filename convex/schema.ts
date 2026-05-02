@@ -231,4 +231,51 @@ export default defineSchema({
   })
     .index("by_automation", ["automationId"])
     .index("by_run_id", ["runId"]),
+
+  // Single-row state for the Perplexity Pro Search integration. Holds the
+  // cookies + user agent extracted from a logged-in browser profile (refreshed
+  // periodically via scripts/refresh-perplexity-cookies.mjs) plus health
+  // counters used by the keep-alive loop and Telegram alerts.
+  perplexityState: defineTable({
+    cookies: v.string(),
+    userAgent: v.string(),
+    timezone: v.optional(v.string()),
+    lastRefreshedAt: v.number(),
+    lastSuccessAt: v.optional(v.number()),
+    lastErrorAt: v.optional(v.number()),
+    lastError: v.optional(v.string()),
+    consecutiveFailures: v.number(),
+    // Best-effort tracking — Perplexity doesn't expose this in the search
+    // response cleanly, so it's only updated when a 429 surfaces or the
+    // refresh script reads it from the rate-limit endpoint.
+    remainingProSearches: v.optional(v.number()),
+  }),
+
+  // Per-query result cache. Key is a SHA-256 of (mode + normalized query),
+  // so the same question in concise vs pro modes is cached separately.
+  // Pro queries get a much shorter TTL than concise to keep results fresh
+  // without paying the network round-trip on accidental same-turn duplicates.
+  perplexityCache: defineTable({
+    queryHash: v.string(),
+    query: v.string(),
+    mode: v.string(),
+    // JSON.stringify({ answer, sources, model, thinkingSteps, backendUuid? })
+    result: v.string(),
+    createdAt: v.number(),
+    expiresAt: v.number(),
+    hits: v.number(),
+  })
+    .index("by_hash", ["queryHash"])
+    .index("by_expiry", ["expiresAt"]),
+
+  // Conversation continuity for follow-up turns. Perplexity's server-side
+  // session memory is keyed by `last_backend_uuid`; we store the most recent
+  // backend UUID per Boop conversation so the next perplexity_search call in
+  // the same conversation can reference it. Sessions live ~1 hour on
+  // Perplexity's side, so consumers must check `lastUsedAt` before reuse.
+  perplexitySessions: defineTable({
+    conversationId: v.string(),
+    backendUuid: v.string(),
+    lastUsedAt: v.number(),
+  }).index("by_conversation", ["conversationId"]),
 });
