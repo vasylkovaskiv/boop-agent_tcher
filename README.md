@@ -654,37 +654,31 @@ Upgrade path when upstream ships changes: run `/upgrade-boop` inside `claude` (t
 
 Optional integration that gives the execution agent a `perplexity_search` tool backed by Perplexity Pro Search (Sonnet thinking + multi-source synthesis with citations). Disabled by default — when `ASOCKS_PROXY_URL` is unset the loader logs `[perplexity] disabled` and `availableIntegrations()` doesn't list it.
 
+**Full setup walkthrough:** [docs/PERPLEXITY_SETUP.md](./docs/PERPLEXITY_SETUP.md) — registration of asocks, Dolphin Anty profile config, cookie seeding, scheduling refreshes, hardening. Read that first if you're setting this up from scratch. The TL;DR below is for someone who already has the proxy + Pro account ready.
+
 Why a residential proxy is non-negotiable: Perplexity's Cloudflare layer reliably 403s requests from datacenter IPs, and a single 403 with the wrong fingerprint can burn the cookies. asocks.com (~$3/GB) is the cheap default. Any HTTP/HTTPS or SOCKS5 residential proxy works.
 
-### Setup (server side)
+### TL;DR setup
 
-Add to `.env.local` on the server where the bot runs:
+On the server where the bot runs, add to `.env.local`:
 
 ```env
 ASOCKS_PROXY_URL=http://USER:PASS@proxy.asocks.com:1080
 PERPLEXITY_TIMEZONE=Europe/Berlin
-TELEGRAM_ADMIN_CHAT_ID=123456789  # falls back to first allowed id if unset
+# Optional override; defaults to first id in TELEGRAM_ALLOWED_CHAT_IDS:
+# TELEGRAM_ADMIN_CHAT_ID=
 ```
 
 Restart the bot. You'll see `[perplexity] registered` in the logs and `mcp__perplexity__perplexity_search` becomes available to spawn-able workers.
 
-### Setup (cookie refresh, local machine only)
+Then on your local machine (where Dolphin Anty is installed and logged into Perplexity):
 
-Cookies are extracted from a logged-in browser profile. The script runs on **your laptop**, not the bot's server, because Dolphin Anty (which holds the profile) is a desktop app.
+```bash
+export CONVEX_URL=<the bot's deployment URL>
+npm run refresh-perplexity-cookies -- --profile-id=<dolphin-profile-id>
+```
 
-1. Install Dolphin Anty and create a profile. Log into perplexity.ai → Pro tier inside that profile manually.
-2. Enable Dolphin's Local API (Settings → Local API → port 3001). Note the profile ID.
-3. On your laptop, with this repo cloned:
-
-   ```bash
-   export CONVEX_URL=<the bot's deployment URL — same as server's>
-   export DOLPHIN_PROFILE_ID=<id-from-step-2>
-   npm run refresh-perplexity-cookies -- --profile-id=$DOLPHIN_PROFILE_ID
-   ```
-
-   The script verifies that `__Secure-next-auth.session-token` is present (without it Perplexity silently downgrades to free tier with no error), then pushes the cookie jar + `navigator.userAgent` into the bot's Convex `perplexityState` table.
-
-4. Repeat every 1–4 weeks, or when the keep-alive loop alerts you on Telegram.
+Repeat the refresh every 1–4 weeks, or when the keep-alive loop alerts you on Telegram. See [docs/PERPLEXITY_SETUP.md → Step 6](./docs/PERPLEXITY_SETUP.md#step-6--set-up-a-refresh-cadence) for cron / launchd automation.
 
 ### What runs where
 
