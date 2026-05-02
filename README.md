@@ -680,15 +680,20 @@ npm run refresh-perplexity-cookies -- --profile-id=<dolphin-profile-id>
 
 Repeat the refresh every 1–4 weeks, or when the keep-alive loop alerts you on Telegram. See [docs/PERPLEXITY_SETUP.md → Step 6](./docs/PERPLEXITY_SETUP.md#step-6--set-up-a-refresh-cadence) for cron / launchd automation.
 
+**Dolphin Free plan?** The `refresh-perplexity-cookies` script needs `?automation=1` on Dolphin's local API, which is gated behind the paid Light tier. On Free, use the manual Cookie-Editor fallback documented in [docs/PERPLEXITY_SETUP.md → Step 5b](./docs/PERPLEXITY_SETUP.md#step-5b--manual-cookie-export-dolphin-free-plan-fallback): export the cookie jar from the running Dolphin profile via the Cookie-Editor extension and push it to Convex with `npx convex run perplexity:updateCookies '{...}'`.
+
 ### What runs where
 
 - `server/perplexity-client.ts` — sequential queue with 1–4s jitter (parallel requests on the same cookie pair are a fast path to a ban). 5-minute cache for Pro queries (dedup same-turn duplicates), heuristic 1h–24h cache for concise.
 - `server/perplexity-keep-alive.ts` — every 6h ± 30 min hits `/api/auth/session` through the proxy. On 401/403 sends a Telegram alert (rate-limited to 1h cooldown) and increments the failure counter in `perplexityState`.
 - `convex/perplexity.ts` — `perplexityState` (singleton), `perplexityCache` (TTL'd), `perplexitySessions` (per-conversation `last_backend_uuid` for follow-ups, expires after 55 min).
 
-### Routing skill
+### Routing — prompt + skill
 
-`.claude/skills/web-research/SKILL.md` (mirrored to `.agents/skills/`) tells the worker when to use `perplexity_search` vs `WebSearch` vs `WebFetch`. The decision tree biases toward Perplexity for current events / multi-source synthesis and toward `WebSearch` for simple fact lookups. The skill explicitly tells the worker to fall back to `WebSearch` if Perplexity returns an error.
+Two places steer the worker toward `mcp__perplexity__perplexity_search`:
+
+1. The execution-agent's system prompt itself (`server/execution-agent.ts` — `buildExecutionSystem()`). When a spawn loads `integrations: ["perplexity", ...]`, the prompt enumerates the loaded integrations + their descriptions and explicitly tells the worker to prefer `mcp__perplexity__perplexity_search` for multi-source synthesis, current events, comparisons, and "Pro Search" / "Про серч" requests; `WebSearch` for simple fact lookups; `WebFetch` for known URLs.
+2. `.claude/skills/web-research/SKILL.md` (mirrored to `.agents/skills/`) — a more detailed decision tree the worker can invoke via the `Skill` tool when the prompt heuristic is ambiguous. Also tells the worker to fall back to `WebSearch` if Perplexity returns an error.
 
 ### When things break
 

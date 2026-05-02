@@ -240,6 +240,10 @@ Env:
 
 Reverse-engineered Perplexity Pro Search integration sitting alongside the Composio path. Loaded in the same `loadIntegrations()` pass, gated on `PERPLEXITY_PROXY_URL` being set (without a residential proxy Cloudflare reliably 403s the search endpoint and burns the cookies; better to no-op).
 
+Routing — how the worker decides to call this tool in the first place:
+- `server/execution-agent.ts` exposes `buildExecutionSystem(integrations)` which appends the loaded integrations + their descriptions onto the worker's system prompt and biases the "Research discipline" section toward `mcp__perplexity__perplexity_search` for multi-source synthesis / current events / explicit "Pro Search" requests, with `WebSearch` reserved for simple fact lookups and `WebFetch` for known URLs.
+- `.claude/skills/web-research/SKILL.md` (mirrored to `.agents/skills/`) holds the more detailed decision tree the worker can consult via the `Skill` tool when the prompt heuristic isn't conclusive.
+
 Flow on a search:
 1. Worker calls `mcp__perplexity__perplexity_search({ query, mode? })`.
 2. `perplexitySearch()` SHA-256s the (mode + model + language + query) tuple, looks it up in `perplexityCache` — Pro queries get a 5-minute TTL (dedup same-turn duplicates), concise gets a 1h–24h heuristic TTL.
@@ -249,7 +253,7 @@ Flow on a search:
 
 Health:
 - `server/perplexity-keep-alive.ts` runs a setTimeout loop (6h ± 30 min jitter) that hits `/api/auth/session` through the proxy. On 401/403 it sends a Telegram alert (`TELEGRAM_ADMIN_CHAT_ID`, falling back to first allowed chat id) with a 1h cooldown and increments `consecutiveFailures` in `perplexityState`.
-- Cookie refresh is a human-driven step run from the user's local machine via `npm run refresh-perplexity-cookies -- --profile-id=<id>`. The script attaches `puppeteer-core` to a Dolphin Anty profile via the local CDP endpoint, extracts the cookie jar, verifies that `__Secure-next-auth.session-token` is present (without that exact cookie name Perplexity silently downgrades to free tier), then pushes everything to Convex via `api.perplexity.updateCookies`.
+- Cookie refresh is a human-driven step run from the user's local machine via `npm run refresh-perplexity-cookies -- --profile-id=<id>`. The script attaches `puppeteer-core` to a Dolphin Anty profile via the local CDP endpoint, extracts the cookie jar, verifies that `__Secure-next-auth.session-token` is present (without that exact cookie name Perplexity silently downgrades to free tier), then pushes everything to Convex via `api.perplexity.updateCookies`. **Dolphin Free plan caveat:** `automation=1` on Dolphin's Local API is paid-tier only; on Free, the script returns 401 and you have to fall back to manual export — install Cookie-Editor in the running Dolphin profile, export the cookie jar as JSON from `perplexity.ai`, and push it via `npx convex run perplexity:updateCookies '{"cookies": "...", "userAgent": "...", "timezone": "..."}'`. See `docs/PERPLEXITY_SETUP.md → Step 5b`.
 
 Cloudflare fallback:
 - The happy path is plain undici fetch through the proxy. If TLS-fingerprinting becomes a problem, set `PERPLEXITY_USE_CYCLETLS=1` and `npm install cycletls`. The client lazy-imports cycletls only when the flag is on, so installs without it keep working.
