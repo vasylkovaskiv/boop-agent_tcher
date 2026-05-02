@@ -8,6 +8,26 @@ Format:
 
 ---
 
+## Unreleased — Perplexity Pro Search integration + Answer-Driven Refinement
+
+- Added: Perplexity Pro Search integration (`server/integrations/perplexity-loader.ts`, `server/perplexity-client.ts`, `server/perplexity-keep-alive.ts`, `server/perplexity-cache.ts`, MCP wrapper at `server/perplexity.ts`). Talks to Perplexity's internal `/rest/sse/perplexity_ask` SSE endpoint via a residential proxy (`PERPLEXITY_PROXY_URL`), authenticated by full-fidelity browser cookies stored in Convex. Returns `{ answer, sources, conversationId, fromCache, mode, modelPreference, raw }` with markdown answer + cited URLs. See `docs/PERPLEXITY_SETUP.md` for the cookie-bootstrap walkthrough (Dolphin Anty profile or Cookie-Editor manual export).
+- Added: `convex/schema.ts` — `perplexityState` (singleton row holding cookies, userAgent, timezone, profileId, dailyQueryCount, lastQueryAt), `perplexitySessions` (per-conversation `{ conversationId, backendUuid, expiresAt }` for thread continuity), `perplexityCache` (query-hash keyed cache with TTL + hit count), `perplexityCookieAlerts` (admin alert dedup).
+- Added: `scripts/refresh-perplexity-cookies.mjs` — reads cookies from Dolphin Anty automation API (or accepts a `--cookies-file` path for manual exports), strips a curated whitelist of fingerprint-relevant cookies, pushes to Convex via `perplexityState.set`. Run on first setup and whenever the keep-alive loop fails 3× in a row (admin alert posts to Telegram automatically).
+- Added: `.claude/skills/perplexity-research/SKILL.md` (mirrored to `.agents/skills/`) — encodes the **Answer-Driven Refinement (ADR)** workflow as a runtime Skill the Haiku-4.5 worker invokes via the SDK's `Skill` tool. Workflow: (1) pack the user's task into ONE Pro Search; (2) self-assess coverage / verification gaps / source quality; (3) optional 0–3 targeted refinements via WebFetch / WebSearch / perplexity_search follow-up (in same Perplexity thread via `last_backend_uuid`); (4) synthesize. Hard cap of 3 perplexity_search calls per spawn. Using a Skill rather than inline prompt instructions reflects that Haiku-4.5 doesn't reliably internalize complex multi-step CoT instructions buried in a long system prompt — invoking on demand is the right primitive.
+- Added: `.claude/skills/web-research/SKILL.md` (mirrored to `.agents/skills/`) — general decision tree for routing between WebSearch / WebFetch / Perplexity, with a top-of-document deferral pointer to `perplexity-research` when the integration is loaded.
+- Added: `INTEGRATION_DIRECTIVES` map in `server/execution-agent.ts` — keyed by integration name, each value is a markdown block appended to the system prompt **only when that integration is actually loaded** for the spawn. Used right now to inject the perplexity-research Skill pointer when (and only when) `perplexity` is in the integrations list. Keeps tool-name references out of the static base prompt where they would otherwise instruct the model to call tools that aren't in `allowedTools`, wasting a reasoning turn on an SDK rejection.
+- Changed: `server/execution-agent.ts` — `buildExecutionSystem(integrations)` now takes the actually-built `Object.keys(integrationServers)` (not the raw requested list), so the system prompt and `allowedTools` stay in sync if any integration's `createServer()` fails. Research discipline section in `EXECUTION_SYSTEM_BASE` simplified back to generic WebSearch/WebFetch/Skill guidance; perplexity-specific routing now lives in the conditional directive.
+- Changed: `server/perplexity-client.ts` — `modelPreference` defaults to `"claude46sonnetthinking"` for **both** `pro` and `concise` modes (was: thinking only for pro). Same Pro-budget cost, materially better synthesis. Callers can still override via `opts.modelPreference`.
+- Changed: `server/perplexity-client.ts` queue jitter — **1–4s → 16–24s** between any two queued Perplexity jobs. Old spacing was bot-like even on a residential IP; new spacing emulates a real Pro user reading-and-typing pace and keeps each spawn's full pipeline in the 1–2 minute range. Comment notes that with single-user traffic this is effectively "within same spawn"; multi-user fan-out would want per-spawn last-call timestamp tracking.
+- Telemetry from a representative pre-/post-ADR comparison (top-5 fitness clubs query → AI 3D-tools comparison query):
+  - Wall-clock per turn: 9.3 min → 1.4 min (-85%).
+  - Cost per turn: $0.388 → $0.085 (-78%).
+  - Perplexity calls per turn: 5 → 1 (-80%).
+  - Worker token spend: 289k in / 3.4k out → 64.8k in / 1.6k out.
+- Required env: `PERPLEXITY_PROXY_URL` (residential proxy URL) — refusing to call Perplexity from a data-center IP. See `.env.example`.
+
+---
+
 ## Unreleased — Telegram bot + Whisper voice transcription
 
 - **[BREAKING]** Replaced the Sendblue/iMessage transport with a [Telegram bot](https://t.me/BotFather) (`grammy` client). All inbound messages now arrive via long-polling (default) or webhook; outbound replies go through `sendTelegramMessage`. `server/sendblue.ts` is deleted; the public surface is `server/telegram.ts`.

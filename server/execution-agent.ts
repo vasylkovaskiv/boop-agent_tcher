@@ -54,10 +54,9 @@ Your job:
 3. Return a concise, well-structured answer — not a data dump.
 
 Research discipline:
-- If \`perplexity\` is loaded for this spawn AND the task involves any kind of synthesis, comparison, top-N list, news roundup, or multi-source research — invoke the \`perplexity-research\` Skill BEFORE calling any web tool. It defines the canonical Answer-Driven Refinement workflow (one packed Pro Search → self-assess → 0–3 targeted refinements → synthesize) and is the only correct way to use the Perplexity integration. Following it keeps Pro quota low and the cookie session healthy.
-- Use WebSearch for simple, single-fact lookups (definitions, version numbers, dates) where Perplexity would be overkill.
+- Use WebSearch for fresh/factual questions (definitions, version numbers, dates).
 - Use WebFetch when you already have a specific URL.
-- When in doubt about which tool to reach for, invoke the \`web-research\` Skill — it documents the general decision tree (and defers to \`perplexity-research\` when Perplexity is loaded).
+- When in doubt about which tool to reach for, invoke the \`web-research\` Skill — it documents the general decision tree.
 - Cite real URLs only — NEVER invent sources. If a page failed to load, say so.
 - Cross-check when it matters: one search is rarely enough for a claim.
 
@@ -74,10 +73,17 @@ output to the user verbatim, so if you don't include URLs, the user won't see
 any.
 
 Style:
-- Optimize for Telegram delivery: short sentences, bullets over paragraphs, no tables.
+- Optimize for Telegram delivery: short sentences, bullets over paragraphs.
 - Prefer markdown with **bold** keywords and • bullets.
 - Under 500 words unless explicitly asked for more.
 - If you can't complete something, say why in one sentence.
+
+Formatting — NEVER use markdown tables. Telegram's MarkdownV2 renderer does NOT support \`| col | col |\` syntax: pipes show up as raw \`\\|\` characters and the layout collapses into unreadable runs of escapes. For comparative or multi-column data, convert to ONE of:
+- **Per-item bullets** with bold name + inline field/value pairs:
+  \`\u2022 **Meshy.ai** — геометрия: высокая, текстуры: средние, лучше для: быстрых превью, цена: от $20/мес\`
+- **Grouped sections** under bold headers, one entry per line:
+  \`**По геометрии:** Rodin > Meshy > Tripo\` then \`**По текстурам:** Adobe Substance > Material Maker\`
+This applies to ALL output: comparison answers, top-N rankings, schedules, pricing, anything you would have laid out as a table on a desktop.
 
 Safety:
 - Anything that sends a message, creates an event, or takes an external action: call save_draft with a JSON payload instead of the real send/create tool. Return the summary so the interaction agent can show it to the user.
@@ -85,14 +91,36 @@ Safety:
 
 Language: Write your final answer in Russian by default — the user is Russian-speaking. URLs, code, command names, and integration names (Gmail, Slack, etc.) stay in their original form. Switch language ONLY when the task or content is clearly in another language (e.g. drafting an English email to an English-speaking colleague — that email body stays in English, but your meta-commentary about it stays in Russian).`;
 
+// Per-integration injectable directives. Keyed by integration name; value is a
+// markdown block appended to the system prompt when (and only when) that
+// integration is actually loaded into the spawn. This keeps perplexity-specific
+// (or any other integration-specific) routing rules out of the static base
+// prompt where they would otherwise reference tools the worker can't actually
+// call — wasting a reasoning turn on an SDK rejection.
+const INTEGRATION_DIRECTIVES: Record<string, string> = {
+  perplexity: `Perplexity is loaded for this spawn. For any task involving synthesis, comparison, top-N lists, news roundups, or multi-source research — invoke the \`perplexity-research\` Skill BEFORE calling any web tool. The Skill defines the canonical Answer-Driven Refinement workflow (one packed Pro Search → self-assess → 0–3 targeted refinements → synthesize) and is the only correct way to use Perplexity. Following it keeps Pro quota low and the cookie session healthy.`,
+};
+
 function buildExecutionSystem(integrations: string[]): string {
   const lines: string[] = [];
+  const directives: string[] = [];
   for (const name of integrations) {
     const mod = getIntegration(name);
     if (mod) lines.push(`- \`${name}\`: ${mod.description}`);
+    const directive = INTEGRATION_DIRECTIVES[name];
+    if (directive) directives.push(directive);
   }
-  if (lines.length === 0) return EXECUTION_SYSTEM_BASE;
-  return `${EXECUTION_SYSTEM_BASE}\n\nIntegrations loaded for this spawn (use the matching mcp__<name>__* tools when they fit):\n${lines.join("\n")}`;
+  if (lines.length === 0 && directives.length === 0) return EXECUTION_SYSTEM_BASE;
+  const parts = [EXECUTION_SYSTEM_BASE];
+  if (lines.length > 0) {
+    parts.push(
+      `Integrations loaded for this spawn (use the matching mcp__<name>__* tools when they fit):\n${lines.join("\n")}`,
+    );
+  }
+  if (directives.length > 0) {
+    parts.push(directives.join("\n\n"));
+  }
+  return parts.join("\n\n");
 }
 
 export interface SpawnOptions {
