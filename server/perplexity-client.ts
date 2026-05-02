@@ -103,8 +103,12 @@ export async function perplexitySearch(
 ): Promise<PerplexitySearchResult> {
   const mode: PerplexityMode = opts.mode ?? "pro";
   const language = opts.language ?? "en-US";
-  const modelPreference =
-    opts.modelPreference ?? (mode === "pro" ? "claude46sonnetthinking" : "claude46sonnet");
+  // Always use the Sonnet-thinking model — even for `concise` mode where
+  // Perplexity's UI normally serves a lighter SKU. We're paying the same Pro
+  // budget either way; might as well get the highest-quality answer that
+  // Perplexity's stack can produce. Callers can still override via
+  // opts.modelPreference if they have a specific reason to want a cheaper SKU.
+  const modelPreference = opts.modelPreference ?? "claude46sonnetthinking";
 
   // Cache lookup. Pro queries get a short TTL (5 min) so accidental same-turn
   // duplicates don't pay the network round-trip; concise queries get the full
@@ -154,10 +158,21 @@ async function drainQueue(): Promise<void> {
         // other queued queries don't get stuck behind this one.
         console.error("[perplexity] queue job failed:", err);
       }
-      // 1–4s jitter between requests — pattern detection on volume is real
-      // even on residential IPs.
+      // 16–24s jitter between requests — emulates a real Pro user reading
+      // an answer before typing the next prompt. The previous 1–4s spacing
+      // burned through cookie reputation faster than the natural pacing of a
+      // human research session, even on a residential IP. With ADR (one Pro
+      // Search + 0–3 follow-ups per spawn), 16–24s puts each spawn's full
+      // pipeline in the 1–2 minute range — still snappy for the user, but
+      // pattern-detection-friendly.
+      //
+      // NOTE: this is a queue-global pause, applied between any two queued
+      // jobs regardless of which spawn / conversation they belong to. With a
+      // single primary user that's effectively "within same spawn". For
+      // multi-user fan-out we'd want to track per-spawn last-call timestamps
+      // and only delay back-to-back calls from the same caller.
       if (queue.length > 0) {
-        await sleep(1000 + Math.random() * 3000);
+        await sleep(16000 + Math.random() * 8000);
       }
     }
   } finally {

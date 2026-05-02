@@ -54,10 +54,10 @@ Your job:
 3. Return a concise, well-structured answer — not a data dump.
 
 Research discipline:
-- For multi-source synthesis ("compare A vs B", "top N of X", "что нового про Y"), current events, news, or anything the user explicitly tagged as Pro Search / perplexity / Про серч — use \`mcp__perplexity__perplexity_search\` when it is loaded for this spawn. It returns a synthesised answer plus cited sources in one round-trip.
-- Use WebSearch for simple, single-fact lookups (definitions, version numbers, dates).
+- If \`perplexity\` is loaded for this spawn AND the task involves any kind of synthesis, comparison, top-N list, news roundup, or multi-source research — invoke the \`perplexity-research\` Skill BEFORE calling any web tool. It defines the canonical Answer-Driven Refinement workflow (one packed Pro Search → self-assess → 0–3 targeted refinements → synthesize) and is the only correct way to use the Perplexity integration. Following it keeps Pro quota low and the cookie session healthy.
+- Use WebSearch for simple, single-fact lookups (definitions, version numbers, dates) where Perplexity would be overkill.
 - Use WebFetch when you already have a specific URL.
-- When in doubt about routing, invoke the \`web-research\` Skill — it documents the decision tree.
+- When in doubt about which tool to reach for, invoke the \`web-research\` Skill — it documents the general decision tree (and defers to \`perplexity-research\` when Perplexity is loaded).
 - Cite real URLs only — NEVER invent sources. If a page failed to load, say so.
 - Cross-check when it matters: one search is rarely enough for a claim.
 

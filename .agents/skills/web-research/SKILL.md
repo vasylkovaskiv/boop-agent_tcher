@@ -7,6 +7,8 @@ description: Choose the right web tool for a research task — WebSearch for sim
 
 You have four web tools at your disposal. Each one has a sweet spot — pick the cheapest tool that actually answers the question. Don't reach for Perplexity when WebSearch would do, and don't reach for WebSearch when you already know the answer.
 
+> **If `perplexity` is loaded and the task is research / synthesis / comparison / top-N — stop reading this skill and invoke `perplexity-research` instead.** That skill encodes the canonical workflow for the Perplexity integration (Answer-Driven Refinement: one packed Pro Search → self-assess → 0–3 targeted refinements). The decision tree below is the fallback for non-Perplexity routing or when Perplexity isn't loaded for this spawn.
+
 ## Decision tree
 
 1. **Do I already know the answer with high confidence?**
