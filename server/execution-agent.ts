@@ -162,7 +162,7 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
     for await (const msg of query({
       prompt: opts.task,
       options: {
-        systemPrompt: buildExecutionSystem(opts.integrations),
+        systemPrompt: buildExecutionSystem(Object.keys(integrationServers)),
         model: requestedModel,
         mcpServers,
         allowedTools,
