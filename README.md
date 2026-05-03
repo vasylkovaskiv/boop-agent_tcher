@@ -4,7 +4,7 @@
 
 # Boop
 
-A Telegram-based personal agent built on top of the [Claude Agent SDK](https://docs.claude.com/en/api/agent-sdk/overview), with optional voice transcription via Groq-hosted whisper-large-v3 (with a self-hosted Whisper sidecar as fallback).
+A Telegram-based personal agent built on top of the [Claude Agent SDK](https://docs.claude.com/en/api/agent-sdk/overview), with optional voice transcription via Groq-hosted whisper-large-v3 (and an opt-in self-hosted Whisper sidecar for offline / fallback use).
 
 📺 **Watch the original walkthrough:** [YouTube — How I built Boop](https://youtu.be/ZpmKjDDbqHs)
 *(walkthrough is for the Sendblue/iMessage version; the architecture and dispatcher/executor split are unchanged — only the transport layer was swapped.)*
@@ -32,7 +32,7 @@ Built on:
 ## What you get
 
 - **Telegram in / Telegram out** via `grammy`, with typing indicators and in-memory update dedup. Long-polling by default — no public URL or TLS needed for local dev.
-- **Voice notes (optional)** — set `GROQ_API_KEY` for hosted whisper-large-v3 (recommended; better accuracy and ~10–30× faster than CPU local), and/or point `WHISPER_URL` at the bundled local sidecar (`whisper-service/`, FastAPI + faster-whisper) as a fallback. With both set, Groq is primary and the sidecar kicks in only on Groq errors. Falls back gracefully to a "voice transcription disabled" reply when neither is configured.
+- **Voice notes (optional)** — set `GROQ_API_KEY` for hosted whisper-large-v3 (recommended; better accuracy and ~10–30× faster than CPU local). The bundled local `whisper-service/` sidecar is **opt-in via Compose profile** — it does not build, pull, or start by default. Bring it up with `docker compose --profile whisper up -d` (and set `WHISPER_URL` in `.env.local`) when you specifically want a fallback. Falls back gracefully to a "voice transcription disabled" reply when neither is configured.
 - **Dispatcher + workers** pattern: a lean interaction agent decides what to do, spawns focused sub-agents that actually do the work.
 - **Pure dispatcher** — the interaction agent has only memory + spawn + automation + draft tools. Web access, files, and integrations are explicitly denied to it; sub-agents get `WebSearch` / `WebFetch` / the integrations.
 - **Tiered memory** (short / long / permanent) with post-turn extraction, decay, and cleaning.
@@ -201,18 +201,18 @@ The same events are written to Convex (`messages`, `executionAgents`, `agentLogs
 
 ---
 
-## Voice transcription (Whisper sidecar)
+## Voice transcription (Whisper)
 
 Voice transcription has **two backends**, set independently. The router in `server/whisper.ts` decides per-call:
 
 1. **Groq whisper-large-v3 (recommended primary).** Set `GROQ_API_KEY` and you're done. Better accuracy than the local `medium` model, ~10–30× faster, and effectively free for personal-bot volume. Get a key at [console.groq.com/keys](https://console.groq.com/keys).
-2. **Local sidecar (fallback / offline option).** A small Python sidecar in [`whisper-service/`](./whisper-service/) — FastAPI + [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — set `WHISPER_URL` to point at it.
+2. **Local sidecar (opt-in fallback / offline option).** A small Python sidecar in [`whisper-service/`](./whisper-service/) — FastAPI + [faster-whisper](https://github.com/SYSTRAN/faster-whisper). **Off by default** in Docker (gated by a Compose profile so it does not build, pull, or start). Enable when you specifically want it.
 
 | `GROQ_API_KEY` | `WHISPER_URL` | Behavior |
 |---|---|---|
-| set | unset | Groq only. Errors surface as "voice transcription temporarily unavailable". |
-| unset | set | Sidecar only (legacy behavior, no change). |
-| **set** | **set** | **Groq first, sidecar on Groq error** (recommended for resilience). |
+| set | unset | **Default — Groq only.** Errors surface as "voice transcription temporarily unavailable". |
+| unset | set | Sidecar only. |
+| set | set | Groq first, sidecar on Groq error (resilience mode). |
 | unset | unset | Voice transcription is disabled — bot replies politely asking for text. |
 
 Either backend returns the same JSON shape `{ text, language, duration }`, so callers don't care which one ran.
@@ -240,7 +240,27 @@ WHISPER_LANGUAGE=           # blank = auto-detect
 
 ### On the VPS (Docker Compose)
 
-The bundled `docker-compose.yml` passes both `GROQ_API_KEY` (from your `.env.local`) and `WHISPER_URL=http://whisper:9000/transcribe` to the boop container, so the router has both paths available. The local sidecar runs as an isolated container on `boop-net` with no external port. See [Deploy to your VPS](#deploy-to-your-vps).
+**By default Groq is the only voice backend.** The `whisper` service in `docker-compose.yml` is gated behind a [Compose profile](https://docs.docker.com/compose/profiles/), so a plain `docker compose up -d --build` neither builds it, downloads its model, nor starts it. `boop-agent` keeps running just fine — the router uses Groq exclusively whenever `WHISPER_URL` is unset.
+
+To enable the local sidecar fallback on the VPS:
+
+```bash
+# 1) Uncomment WHISPER_URL in .env.local on the VPS:
+#    WHISPER_URL=http://whisper:9000/transcribe
+# 2) Bring up the stack with the whisper profile:
+docker compose --profile whisper up -d --build
+```
+
+When the profile is active, the sidecar runs as an isolated container on `boop-net` with no external port. To turn it back off:
+
+```bash
+docker compose stop whisper
+# Optionally also: re-comment WHISPER_URL in .env.local and recreate boop
+# so the router stops attempting fallback on Groq errors.
+docker compose up -d boop
+```
+
+See [Deploy to your VPS](#deploy-to-your-vps).
 
 ### Memory footprint cheatsheet
 
