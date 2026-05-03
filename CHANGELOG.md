@@ -8,6 +8,15 @@ Format:
 
 ---
 
+## Unreleased — Voice transcription via Groq whisper-large-v3 (with local sidecar fallback)
+
+- Added: `server/groq-whisper.ts` — Groq Cloud whisper-large-v3 client. Multipart POST to `/openai/v1/audio/transcriptions` with `response_format=verbose_json` so the response shape matches the existing local sidecar (`{ text, language, duration }`). Authed by `GROQ_API_KEY`. Distinct `GroqWhisperError` so the router can branch on error type. No new npm dependency — built on the platform `fetch` + `FormData`.
+- Changed: `server/whisper.ts` is now a router. With both `GROQ_API_KEY` and `WHISPER_URL` configured, Groq runs first and the local sidecar (`whisper-service/`) is the fallback only. Either backend may run alone. With neither configured, the existing `WhisperNotConfiguredError` semantics are preserved so the Telegram handler keeps replying "voice transcription isn't enabled" instead of timing out.
+- Why: the local `medium` model on a CPU sidecar takes 7–30 s for a typical Telegram voice note and has noticeably worse accuracy than `large-v3`, especially on accented Russian / English code-switching. Groq's hosted whisper-large-v3 is ~10–30× faster (~1–3 s for the same voice note) and effectively free at our volume. We keep the local sidecar wired up as a safety net so an outage of Groq doesn't take voice notes offline.
+- Required env (optional but recommended): `GROQ_API_KEY` — added to `.env.example` and threaded through `docker-compose.yml`. The sidecar's `WHISPER_URL` continues to work standalone if you'd rather not rely on a hosted dependency.
+
+---
+
 ## Unreleased — Perplexity Pro Search integration + Answer-Driven Refinement
 
 - Added: Perplexity Pro Search integration (`server/integrations/perplexity-loader.ts`, `server/perplexity-client.ts`, `server/perplexity-keep-alive.ts`, `server/perplexity-cache.ts`, MCP wrapper at `server/perplexity.ts`). Talks to Perplexity's internal `/rest/sse/perplexity_ask` SSE endpoint via a residential proxy (`PERPLEXITY_PROXY_URL`), authenticated by full-fidelity browser cookies stored in Convex. Returns `{ answer, sources, conversationId, fromCache, mode, modelPreference, raw }` with markdown answer + cited URLs. See `docs/PERPLEXITY_SETUP.md` for the cookie-bootstrap walkthrough (Dolphin Anty profile or Cookie-Editor manual export).

@@ -4,7 +4,7 @@
 
 # Boop
 
-A Telegram-based personal agent built on top of the [Claude Agent SDK](https://docs.claude.com/en/api/agent-sdk/overview), with optional voice transcription via a self-hosted Whisper sidecar.
+A Telegram-based personal agent built on top of the [Claude Agent SDK](https://docs.claude.com/en/api/agent-sdk/overview), with optional voice transcription via Groq-hosted whisper-large-v3 (with a self-hosted Whisper sidecar as fallback).
 
 📺 **Watch the original walkthrough:** [YouTube — How I built Boop](https://youtu.be/ZpmKjDDbqHs)
 *(walkthrough is for the Sendblue/iMessage version; the architecture and dispatcher/executor split are unchanged — only the transport layer was swapped.)*
@@ -32,7 +32,7 @@ Built on:
 ## What you get
 
 - **Telegram in / Telegram out** via `grammy`, with typing indicators and in-memory update dedup. Long-polling by default — no public URL or TLS needed for local dev.
-- **Voice notes (optional)** — point `WHISPER_URL` at the bundled Whisper sidecar (`whisper-service/`, FastAPI + faster-whisper) and Boop transcribes incoming voice messages before handing them to the agent. Falls back gracefully when Whisper is offline.
+- **Voice notes (optional)** — set `GROQ_API_KEY` for hosted whisper-large-v3 (recommended; better accuracy and ~10–30× faster than CPU local), and/or point `WHISPER_URL` at the bundled local sidecar (`whisper-service/`, FastAPI + faster-whisper) as a fallback. With both set, Groq is primary and the sidecar kicks in only on Groq errors. Falls back gracefully to a "voice transcription disabled" reply when neither is configured.
 - **Dispatcher + workers** pattern: a lean interaction agent decides what to do, spawns focused sub-agents that actually do the work.
 - **Pure dispatcher** — the interaction agent has only memory + spawn + automation + draft tools. Web access, files, and integrations are explicitly denied to it; sub-agents get `WebSearch` / `WebFetch` / the integrations.
 - **Tiered memory** (short / long / permanent) with post-turn extraction, decay, and cleaning.
@@ -140,7 +140,7 @@ Open Telegram, message your bot — it replies. Send a voice note and (with `WHI
 
 > **Lock down the bot.** Until you set `TELEGRAM_ALLOWED_CHAT_IDS` in `.env.local`, anyone who finds your bot's username can chat with it and burn your Claude tokens. `npm run setup` adds your own chat id automatically — verify it landed in `.env.local`.
 
-> **Voice transcription is opt-in.** With `WHISPER_URL` blank, Boop just replies "Voice transcription isn't enabled — please send text." instead of trying to transcribe. To enable, see [Voice transcription](#voice-transcription-whisper-sidecar) below.
+> **Voice transcription is opt-in.** With both `GROQ_API_KEY` and `WHISPER_URL` blank, Boop just replies "Voice transcription isn't enabled — please send text." instead of trying to transcribe. To enable, see [Voice transcription](#voice-transcription-whisper-sidecar) below.
 
 > **Need a public URL?** Polling Telegram needs none. You only need a tunnel for **Composio webhook** (proactive Gmail notifications) or **`TELEGRAM_MODE=webhook`**. Free ngrok / Cloudflare Tunnel both work — see [Public URL setups](#public-url-setups) below.
 
@@ -203,18 +203,25 @@ The same events are written to Convex (`messages`, `executionAgents`, `agentLogs
 
 ## Voice transcription (Whisper sidecar)
 
-Boop ships a small Python sidecar in [`whisper-service/`](./whisper-service/) — FastAPI + [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — that exposes one endpoint:
+Voice transcription has **two backends**, set independently. The router in `server/whisper.ts` decides per-call:
 
-```
-POST /transcribe
-{ "url": "https://api.telegram.org/file/bot.../voice.oga" }
+1. **Groq whisper-large-v3 (recommended primary).** Set `GROQ_API_KEY` and you're done. Better accuracy than the local `medium` model, ~10–30× faster, and effectively free for personal-bot volume. Get a key at [console.groq.com/keys](https://console.groq.com/keys).
+2. **Local sidecar (fallback / offline option).** A small Python sidecar in [`whisper-service/`](./whisper-service/) — FastAPI + [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — set `WHISPER_URL` to point at it.
 
-→ { "text": "...", "language": "en", "duration": 4.7 }
-```
+| `GROQ_API_KEY` | `WHISPER_URL` | Behavior |
+|---|---|---|
+| set | unset | Groq only. Errors surface as "voice transcription temporarily unavailable". |
+| unset | set | Sidecar only (legacy behavior, no change). |
+| **set** | **set** | **Groq first, sidecar on Groq error** (recommended for resilience). |
+| unset | unset | Voice transcription is disabled — bot replies politely asking for text. |
 
-The Node server calls it whenever a Telegram voice / audio message arrives. If `WHISPER_URL` is empty or the call fails, Boop replies with a polite fallback message instead of crashing.
+Either backend returns the same JSON shape `{ text, language, duration }`, so callers don't care which one ran.
 
-### Local dev
+### Local dev — Groq
+
+Just put `GROQ_API_KEY=…` in `.env.local`. Nothing else to install or run.
+
+### Local dev — sidecar
 
 ```bash
 cd whisper-service
@@ -233,7 +240,7 @@ WHISPER_LANGUAGE=           # blank = auto-detect
 
 ### On the VPS (Docker Compose)
 
-The bundled `docker-compose.yml` runs Whisper as an isolated container on `boop-net` with no external port, talking to the Node container at `http://whisper:9000/transcribe`. See [Deploy to your VPS](#deploy-to-your-vps).
+The bundled `docker-compose.yml` passes both `GROQ_API_KEY` (from your `.env.local`) and `WHISPER_URL=http://whisper:9000/transcribe` to the boop container, so the router has both paths available. The local sidecar runs as an isolated container on `boop-net` with no external port. See [Deploy to your VPS](#deploy-to-your-vps).
 
 ### Memory footprint cheatsheet
 
