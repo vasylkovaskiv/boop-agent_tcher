@@ -124,14 +124,37 @@ export async function transcribeViaGroq(downloadUrl: string): Promise<Transcribe
   }
 }
 
+// Groq's audio endpoint sniffs container type by filename extension and
+// rejects anything outside this allowlist with HTTP 400. Notably absent:
+// `.oga`, which Telegram uses for voice notes (Ogg/Opus, same container as
+// `.ogg` but a different file extension). We normalise unknown extensions
+// to `.ogg` since Telegram voice notes always are Ogg/Opus.
+const GROQ_ALLOWED_EXTENSIONS = new Set([
+  "flac",
+  "mp3",
+  "mp4",
+  "mpeg",
+  "mpga",
+  "m4a",
+  "ogg",
+  "opus",
+  "wav",
+  "webm",
+]);
+
 function inferFilename(url: string): string {
-  // Telegram voice notes are .ogg (opus). Groq uses the filename extension
-  // as a hint to pick the audio decoder, so we want to preserve it. Fall
-  // back to `.ogg` since that's what Telegram voice always is.
   try {
     const u = new URL(url);
     const last = u.pathname.split("/").pop() ?? "";
-    if (last && /\.[a-zA-Z0-9]{2,5}$/.test(last)) return last;
+    const m = /\.([a-zA-Z0-9]{2,5})$/.exec(last);
+    if (m) {
+      const ext = m[1].toLowerCase();
+      if (GROQ_ALLOWED_EXTENSIONS.has(ext)) return last;
+      // Telegram voice → `.oga` (Ogg/Opus). Audio uploads can be anything.
+      // Either way, when in doubt, claim Ogg — the actual bytes will be
+      // sniffed by ffmpeg behind Groq's API and an Opus-in-Ogg stream
+      // decodes regardless.
+    }
   } catch {
     // ignore, fall through
   }
