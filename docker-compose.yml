@@ -12,8 +12,15 @@
 #                          (Composio webhook, or TELEGRAM_MODE=webhook).
 #                          Polling-mode Telegram needs no public URL at all.
 #
-# Bring up:
+# Voice transcription is Groq-only by default. The local faster-whisper
+# sidecar in `whisper-service/` lives behind a Compose profile so it does
+# NOT build, pull or start unless explicitly opted in.
+#
+# Bring up (Groq only — no whisper container, no model download):
 #   docker compose up -d --build
+# Bring up with the local sidecar fallback enabled:
+#   docker compose --profile whisper up -d --build
+#   # …and uncomment WHISPER_URL in .env.local so the Node router knows about it.
 # Tail logs:
 #   docker compose logs -f boop
 # Stop:
@@ -30,24 +37,27 @@ services:
     restart: unless-stopped
     env_file: .env.local
     environment:
-      # Voice transcription router. The Node code in server/whisper.ts picks
-      # Groq whisper-large-v3 first (when GROQ_API_KEY is set in .env.local)
-      # and falls back to the local sidecar at WHISPER_URL on Groq errors.
-      # GROQ_API_KEY is intentionally NOT listed here — values under
-      # `environment:` override values in `env_file:`, and ${GROQ_API_KEY:-}
-      # would resolve against the host shell (usually empty), silently
-      # blanking the .env.local value. WHISPER_URL is overridden because it
-      # has a Docker-specific DNS name that differs from local dev.
-      WHISPER_URL: http://whisper:9000/transcribe
+      # Voice transcription router. server/whisper.ts uses Groq
+      # whisper-large-v3 when GROQ_API_KEY is set, and falls back to the
+      # local sidecar when WHISPER_URL is set. Neither value is forced
+      # here — both come from .env.local — because anything listed under
+      # `environment:` overrides `env_file:` (and ${VAR:-} resolves
+      # against the host shell, not .env.local).
+      #
+      # If you want the local sidecar fallback, bring it up with the
+      # `whisper` profile (see top comment) AND set in .env.local:
+      #   WHISPER_URL=http://whisper:9000/transcribe
       NODE_ENV: production
       PORT: "3456"
     networks:
       - boop-net
       # Comment the next line out if you don't need any public route at all.
       - traefik-public
-    depends_on:
-      whisper:
-        condition: service_started
+    # No depends_on for whisper: that service is profile-gated and may
+    # legitimately be absent. server/whisper.ts treats a missing sidecar
+    # the same as a misconfigured one — Groq stays primary, no startup
+    # races, no spurious wait.
+    #
     # mem_limit intentionally absent: the Node runtime + the local embeddings
     # model (~440 MB) + the spawned Claude CLI subprocess together peak well
     # above 2 GB during a busy turn. A hard cap silently OOM-kills the
@@ -87,6 +97,12 @@ services:
 
   whisper:
     container_name: boop-whisper
+    # Profile-gated: this service is OFF by default. Groq whisper-large-v3
+    # handles voice in production. Bring the sidecar up explicitly with:
+    #   docker compose --profile whisper up -d --build
+    # …only when you specifically want the local fallback (e.g. air-gapped
+    # deployments, or to validate Groq failures end-to-end).
+    profiles: ["whisper"]
     build:
       context: ./whisper-service
       dockerfile: Dockerfile

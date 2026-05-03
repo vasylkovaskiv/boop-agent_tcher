@@ -8,6 +8,15 @@ Format:
 
 ---
 
+## Unreleased — Local Whisper sidecar is now opt-in via Compose profile
+
+- [BREAKING] Changed: `docker-compose.yml` — the `whisper` service is gated behind `profiles: ["whisper"]`. A plain `docker compose up -d --build` no longer builds it, downloads its model, or starts it. Bring it up explicitly with `docker compose --profile whisper up -d --build` when you actually want the local fallback. `boop`'s `depends_on: whisper` is also gone — the service starts cleanly when the sidecar is absent.
+- [BREAKING] Changed: `WHISPER_URL` is no longer hard-coded in the `boop` service's `environment:` block. The router treats an unset `WHISPER_URL` as "no sidecar", so by default Groq is the sole voice backend. To re-enable sidecar fallback on the VPS: uncomment `WHISPER_URL=http://whisper:9000/transcribe` in `.env.local` AND start the stack with the `whisper` profile.
+- Why: in production, Groq whisper-large-v3 has been the only path that runs (sidecar was a fallback that never triggered after the initial Groq stabilization). Carrying the `boop-whisper` container around — with its ~440 MB model download, ~900 MB resident RAM, and 4 GB mem_limit reservation — is dead weight on a 7–8 GiB VPS. Profile-gating keeps the code path and `whisper-service/` directory intact for offline / air-gapped use, but stops paying the runtime cost when nobody asked for it.
+- Migration: pull, then on the VPS run `docker compose stop whisper && docker compose up -d boop`. To rejoin the previous behavior, follow the README's "On the VPS (Docker Compose)" subsection.
+
+---
+
 ## Unreleased — Voice transcription via Groq whisper-large-v3 (with local sidecar fallback)
 
 - Added: `server/groq-whisper.ts` — Groq Cloud whisper-large-v3 client. Multipart POST to `/openai/v1/audio/transcriptions` with `response_format=verbose_json` so the response shape matches the existing local sidecar (`{ text, language, duration }`). Authed by `GROQ_API_KEY`. Distinct `GroqWhisperError` so the router can branch on error type. No new npm dependency — built on the platform `fetch` + `FormData`.
