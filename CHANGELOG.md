@@ -8,6 +8,13 @@ Format:
 
 ---
 
+## Unreleased — Mailcow infrastructure doc
+
+- Added: `docs/MAIL_SETUP.md` — operational guide for running Mailcow alongside `boop-agent` and Traefik on a single VPS. Generic / domain-agnostic; no credentials in the repo. Covers DNS, rDNS, the `configure_ipv6` patch needed to avoid restarting Docker on a shared host, the Traefik override for HTTP/HTTPS routing, DKIM publication, and a deliverability smoke test.
+- Why: setting this up cleanly on a small VPS (~7 GiB RAM) without disrupting `boop-agent` requires several non-obvious choices (skip ClamAV, skip IPv6, skip Mailcow's ACME, bind HTTP/HTTPS to localhost behind Traefik). Capturing them here so a fork can reproduce the setup without re-deriving the constraints.
+
+---
+
 ## Unreleased — Local Whisper sidecar is now opt-in via Compose profile
 
 - [BREAKING] Changed: `docker-compose.yml` — the `whisper` service is gated behind `profiles: ["whisper"]`. A plain `docker compose up -d --build` no longer builds it, downloads its model, or starts it. Bring it up explicitly with `docker compose --profile whisper up -d --build` when you actually want the local fallback. `boop`'s `depends_on: whisper` is also gone — the service starts cleanly when the sidecar is absent.
