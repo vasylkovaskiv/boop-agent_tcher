@@ -30,11 +30,14 @@ services:
     restart: unless-stopped
     env_file: .env.local
     environment:
-      # Voice transcription router. Groq whisper-large-v3 is primary (set
-      # GROQ_API_KEY in .env.local), the local sidecar at WHISPER_URL is the
-      # fallback. With both set, server/whisper.ts tries Groq first and only
-      # touches the sidecar if Groq errors out.
-      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      # Voice transcription router. The Node code in server/whisper.ts picks
+      # Groq whisper-large-v3 first (when GROQ_API_KEY is set in .env.local)
+      # and falls back to the local sidecar at WHISPER_URL on Groq errors.
+      # GROQ_API_KEY is intentionally NOT listed here — values under
+      # `environment:` override values in `env_file:`, and ${GROQ_API_KEY:-}
+      # would resolve against the host shell (usually empty), silently
+      # blanking the .env.local value. WHISPER_URL is overridden because it
+      # has a Docker-specific DNS name that differs from local dev.
       WHISPER_URL: http://whisper:9000/transcribe
       NODE_ENV: production
       PORT: "3456"
